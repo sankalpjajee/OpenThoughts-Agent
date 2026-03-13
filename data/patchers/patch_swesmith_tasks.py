@@ -358,25 +358,18 @@ def patch_task(
                 setup_commands=setup_commands,
             )
             lines = original_solve.split("\n")
-            insert_idx = 0
-            for i, line in enumerate(lines):
+            # Keep only the shebang and canary comment lines (header),
+            # then append our setup block. The original solve.sh applies
+            # a bug patch to a pre-built image; we don't need that since
+            # our cloned mirror repo is already at the fixed/original state.
+            header_lines = []
+            for line in lines:
                 stripped = line.strip()
-                if stripped and not stripped.startswith("#") and not stripped.startswith("!"):
-                    insert_idx = i
+                if stripped.startswith("#!/") or stripped.startswith("# "):
+                    header_lines.append(line)
+                else:
                     break
-            patched_solve = (
-                "\n".join(lines[:insert_idx])
-                + "\n"
-                + setup_block
-                + "\n".join(lines[insert_idx:])
-            )
-            # The original solve.sh uses --reverse because the pre-built image
-            # had the fixed code and needed to revert to buggy state first.
-            # Our cloned repo is already at the buggy state, so remove --reverse.
-            patched_solve = patched_solve.replace(
-                "git apply --verbose --reject --reverse",
-                "git apply --verbose --reject"
-            )
+            patched_solve = "\n".join(header_lines) + "\n" + setup_block
             solve_sh_path.write_text(patched_solve)
             changes["solve.sh"] = True
     else:
