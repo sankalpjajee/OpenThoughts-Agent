@@ -211,12 +211,11 @@ git checkout {buggy_branch}
 
 SOLVE_SH_SETUP_TEMPLATE = """\
 # --- Environment setup (for generic base images) ---
+# Oracle: clone default branch (fixed code + all test files)
 cd /testbed
 git clone {mirror_url} .
-git checkout {buggy_branch}
 {setup_commands}
 # --- End environment setup ---
-
 """
 
 
@@ -395,27 +394,23 @@ def patch_task(
         else:
             setup_block = SOLVE_SH_SETUP_TEMPLATE.format(
                 mirror_url=mirror_url,
-                buggy_branch=buggy_branch,
                 setup_commands=setup_commands,
             )
             lines = original_solve.split("\n")
-            # Keep shebang/canary header lines, then our setup block,
-            # then the original solve.sh body (which does git apply --reverse
-            # to fix the buggy code — correct since we checked out the buggy branch).
+            # Keep only shebang/canary header lines + our setup block.
+            # The oracle just needs to clone the default branch (fixed code + all test files)
+            # and install deps. No git apply needed — the default branch is already fixed.
             header_lines = []
-            body_start = 0
-            for i, line in enumerate(lines):
+            for line in lines:
                 stripped = line.strip()
                 if stripped.startswith("#!/") or stripped.startswith("# "):
                     header_lines.append(line)
                 else:
-                    body_start = i
                     break
             patched_solve = (
                 "\n".join(header_lines)
                 + "\n"
                 + setup_block
-                + "\n".join(lines[body_start:])
             )
             solve_sh_path.write_text(patched_solve)
             changes["solve.sh"] = True
