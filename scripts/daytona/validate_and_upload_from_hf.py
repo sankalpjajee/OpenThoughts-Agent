@@ -401,15 +401,18 @@ def _run_harbor_smoke_test(
             rate=0.0,
         )
 
-        async def _progress_hook(trial_result):
+        async def _progress_hook(hook_event):
             nonlocal success_count, failure_count
+            # harbor wraps TrialResult in a TrialHookEvent; unwrap it
+            trial_result = getattr(hook_event, 'result', hook_event)
+            task_name = getattr(hook_event, 'task_name', None) or getattr(trial_result, 'task_name', '')
             rewards = None
-            if trial_result.verifier_result is not None:
+            if trial_result is not None and getattr(trial_result, 'verifier_result', None) is not None:
                 rewards = trial_result.verifier_result.rewards
-            is_success = trial_result.exception_info is None
+            is_success = trial_result is not None and getattr(trial_result, 'exception_info', None) is None
             if is_success and filter_successful:
                 is_success = _reward_positive(rewards)
-            stage_status[trial_result.task_name] = bool(is_success)
+            stage_status[task_name] = bool(is_success)
             if is_success:
                 success_count += 1
             else:
@@ -555,16 +558,20 @@ def _run_oracle_solution_check(
             rate=0.0,
         )
 
-        async def _progress_hook(trial_result):
+        async def _progress_hook(hook_event):
             nonlocal success_count, failure_count
+            # harbor wraps TrialResult in a TrialHookEvent; unwrap it
+            trial_result = getattr(hook_event, 'result', hook_event)
+            task_name = getattr(hook_event, 'task_name', None) or getattr(trial_result, 'task_name', '')
             rewards = None
-            if trial_result.verifier_result is not None:
+            if trial_result is not None and getattr(trial_result, 'verifier_result', None) is not None:
                 rewards = trial_result.verifier_result.rewards
             is_success = (
-                trial_result.exception_info is None
+                trial_result is not None
+                and getattr(trial_result, 'exception_info', None) is None
                 and _reward_is_one(rewards)
             )
-            stage_status[trial_result.task_name] = bool(is_success)
+            stage_status[task_name] = bool(is_success)
             if is_success:
                 success_count += 1
             else:
