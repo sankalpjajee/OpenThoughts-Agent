@@ -174,7 +174,7 @@ SETUP_PREAMBLE_TEMPLATE = """\
 
 ```bash
 cd /testbed
-git clone {mirror_url} . && git checkout {commit}
+git clone {mirror_url} .
 {setup_commands}
 ```
 
@@ -185,7 +185,7 @@ git clone {mirror_url} . && git checkout {commit}
 SOLVE_SH_SETUP_TEMPLATE = """\
 # --- Environment setup (for generic base images) ---
 cd /testbed
-git clone {mirror_url} . && git checkout {commit}
+git clone {mirror_url} .
 {setup_commands}
 # --- End environment setup ---
 
@@ -275,9 +275,10 @@ def patch_task(
         mirror_url = f"https://github.com/{repo}"
     commit = getattr(profile, "commit", "HEAD")
     setup_commands = build_setup_commands(profile)
-    test_cmd = getattr(profile, "test_cmd",
-                       "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider "
-                       "-W ignore::DeprecationWarning")
+    # Always use a clean pip-based pytest command.
+    # The profile's test_cmd often contains conda/miniconda references that
+    # don't exist in our generic python:X.Y-bookworm base image.
+    test_cmd = "pytest --no-header -rA --tb=line --color=no -p no:cacheprovider -W ignore::DeprecationWarning"
 
     # --- 1. Dockerfile ---
     new_dockerfile = DOCKERFILE_TEMPLATE.format(python_version=python_version)
@@ -311,7 +312,6 @@ def patch_task(
         else:
             preamble = SETUP_PREAMBLE_TEMPLATE.format(
                 mirror_url=mirror_url,
-                commit=commit,
                 setup_commands=setup_commands,
             )
             instruction_path.write_text(preamble + original_text)
@@ -348,7 +348,6 @@ def patch_task(
         else:
             setup_block = SOLVE_SH_SETUP_TEMPLATE.format(
                 mirror_url=mirror_url,
-                commit=commit,
                 setup_commands=setup_commands,
             )
             lines = original_solve.split("\n")
