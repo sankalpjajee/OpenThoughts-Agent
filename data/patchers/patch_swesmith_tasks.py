@@ -182,6 +182,7 @@ SETUP_PREAMBLE_TEMPLATE = """\
 ```bash
 cd /testbed
 git clone {mirror_url} .
+git checkout {buggy_branch}
 {setup_commands}
 ```
 
@@ -193,6 +194,7 @@ SOLVE_SH_SETUP_TEMPLATE = """\
 # --- Environment setup (for generic base images) ---
 cd /testbed
 git clone {mirror_url} .
+git checkout {buggy_branch}
 {setup_commands}
 # --- End environment setup ---
 
@@ -282,6 +284,24 @@ def patch_task(
         mirror_url = f"https://github.com/{repo}"
     commit = getattr(profile, "commit", "HEAD")
     setup_commands = build_setup_commands(profile)
+
+    # Extract the buggy branch name from the original Dockerfile.
+    # The original Dockerfile has: RUN git fetch && git checkout <buggy_branch>
+    # e.g. oauthlib__oauthlib.1fd52536.combine_file__09vlzwgc
+    buggy_branch = None
+    orig_dockerfile_path = task_dir / "environment" / "Dockerfile"
+    if orig_dockerfile_path.exists():
+        for line in orig_dockerfile_path.read_text().splitlines():
+            if "git checkout" in line and "git fetch" in line:
+                # Line: RUN git fetch && git checkout <branch>
+                buggy_branch = line.strip().split("git checkout")[-1].strip()
+                break
+            elif line.strip().startswith("RUN git checkout"):
+                buggy_branch = line.strip().replace("RUN git checkout", "").strip()
+                break
+    if not buggy_branch:
+        # Fallback: use commit from profile
+        buggy_branch = commit
     # Always use a clean pip-based pytest command.
     # The profile's test_cmd often contains conda/miniconda references that
     # don't exist in our generic python:X.Y-bookworm base image.
@@ -319,6 +339,7 @@ def patch_task(
         else:
             preamble = SETUP_PREAMBLE_TEMPLATE.format(
                 mirror_url=mirror_url,
+                buggy_branch=buggy_branch,
                 setup_commands=setup_commands,
             )
             instruction_path.write_text(preamble + original_text)
@@ -355,21 +376,28 @@ def patch_task(
         else:
             setup_block = SOLVE_SH_SETUP_TEMPLATE.format(
                 mirror_url=mirror_url,
+                buggy_branch=buggy_branch,
                 setup_commands=setup_commands,
             )
             lines = original_solve.split("\n")
-            # Keep only the shebang and canary comment lines (header),
-            # then append our setup block. The original solve.sh applies
-            # a bug patch to a pre-built image; we don't need that since
-            # our cloned mirror repo is already at the fixed/original state.
+            # Keep shebang/canary header lines, then our setup block,
+            # then the original solve.sh body (which does git apply --reverse
+            # to fix the buggy code — correct since we checked out the buggy branch).
             header_lines = []
-            for line in lines:
+            body_start = 0
+            for i, line in enumerate(lines):
                 stripped = line.strip()
                 if stripped.startswith("#!/") or stripped.startswith("# "):
                     header_lines.append(line)
                 else:
+                    body_start = i
                     break
-            patched_solve = "\n".join(header_lines) + "\n" + setup_block
+            patched_solve = (
+                "\n".join(header_lines)
+                + "\n"
+                + setup_block
+                + "\n".join(lines[body_start:])
+            )
             solve_sh_path.write_text(patched_solve)
             changes["solve.sh"] = True
     else:
