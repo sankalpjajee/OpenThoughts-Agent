@@ -87,8 +87,27 @@ if [ -f /tests/test_patch.diff ]; then
         git apply --verbose --reject /tests/test_patch.diff || true
 fi
 
-# Run test command
-{test_cmd} --continue-on-collection-errors > /logs/test_output.log 2>&1
+# Extract specific test files from config.json (run only relevant tests to avoid missing-dep failures)
+TEST_FILES=$(python3 -c "
+import json, sys
+try:
+    cfg = json.load(open('/tests/config.json'))
+    f2p = cfg.get('FAIL_TO_PASS', [])
+    p2p = cfg.get('PASS_TO_PASS', [])
+    if isinstance(f2p, str): f2p = json.loads(f2p)
+    if isinstance(p2p, str): p2p = json.loads(p2p)
+    files = sorted(set(t.split('::')[0] for t in f2p + p2p))
+    print(' '.join(files))
+except Exception as e:
+    print('', file=sys.stderr)
+" 2>/dev/null)
+
+# Run test command on specific test files only
+if [ -n "$TEST_FILES" ]; then
+    {test_cmd} $TEST_FILES --continue-on-collection-errors > /logs/test_output.log 2>&1
+else
+    {test_cmd} --continue-on-collection-errors > /logs/test_output.log 2>&1
+fi
 
 # Dump test output for debugging
 echo "=== TEST OUTPUT (last 100 lines) ==="
