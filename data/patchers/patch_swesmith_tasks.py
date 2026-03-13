@@ -73,6 +73,13 @@ TEST_SH_TEMPLATE = """\
 
 mkdir -p /logs/verifier
 
+# Install uv if not present (needed for grading step)
+curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null || true
+export PATH="$HOME/.local/bin:$PATH"
+
+# Install pytest for running tests
+pip install pytest --quiet 2>/dev/null
+
 # Apply test patch (tests contributed by the fix PR, not visible to agent)
 cd /testbed
 if [ -f /tests/test_patch.diff ]; then
