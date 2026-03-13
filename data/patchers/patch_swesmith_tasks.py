@@ -370,6 +370,13 @@ def patch_task(
                 + setup_block
                 + "\n".join(lines[insert_idx:])
             )
+            # The original solve.sh uses --reverse because the pre-built image
+            # had the fixed code and needed to revert to buggy state first.
+            # Our cloned repo is already at the buggy state, so remove --reverse.
+            patched_solve = patched_solve.replace(
+                "git apply --verbose --reject --reverse",
+                "git apply --verbose --reject"
+            )
             solve_sh_path.write_text(patched_solve)
             changes["solve.sh"] = True
     else:
