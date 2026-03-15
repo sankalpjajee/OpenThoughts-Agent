@@ -178,7 +178,7 @@ fi
 ENSURE_DEPS_FUNCTION = """\
 ensure_dependencies() {
     log "Installing base Python tooling"
-    python3 -m pip install --break-system-packages --upgrade pip setuptools wheel
+    python3 -m pip install --break-system-packages --upgrade pip setuptools wheel || true
 
     if [ -f requirements-dev.txt ]; then
         log "Installing requirements-dev.txt"
@@ -291,6 +291,22 @@ def patch_solve_sh(content: str, repo: str, commit: str) -> str:
 # Task patching
 # ---------------------------------------------------------------------------
 
+def dedent_sh(content: str) -> str:
+    """Strip exactly 8 leading spaces from lines that start with 8 spaces.
+    
+    The original swegym solve.sh and test.sh are indented by 8 spaces on all
+    script lines, but heredoc content (diff lines) may start at column 0.
+    We strip 8 spaces only from lines that have them.
+    """
+    result = []
+    for line in content.split("\n"):
+        if line.startswith("        "):  # 8 spaces
+            result.append(line[8:])
+        else:
+            result.append(line)
+    return "\n".join(result)
+
+
 def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = False) -> dict:
     """Patch a single extracted swegym task directory."""
     changes = {}
@@ -303,31 +319,29 @@ def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = F
         dockerfile_path.write_text(new_dockerfile)
     changes["Dockerfile"] = True
 
-    # 2. test.sh - add git clone + fix ensure_dependencies
+    # 2. test.sh - dedent + add git clone + fix ensure_dependencies
     test_sh_path = task_dir / "tests" / "test.sh"
     if test_sh_path.exists():
         original = test_sh_path.read_text()
-        patched = patch_test_sh(original, repo, commit)
-        if patched != original:
-            if not dry_run:
-                test_sh_path.write_text(patched)
-            changes["test.sh"] = True
-        else:
-            changes["test.sh"] = False
+        # Dedent first (original has 8 spaces of indentation)
+        dedented = dedent_sh(original)
+        patched = patch_test_sh(dedented, repo, commit)
+        if not dry_run:
+            test_sh_path.write_text(patched)
+        changes["test.sh"] = True
     else:
         changes["test.sh"] = False
 
-    # 3. solve.sh - add git clone
+    # 3. solve.sh - dedent + add git clone
     solve_sh_path = task_dir / "solution" / "solve.sh"
     if solve_sh_path.exists():
         original = solve_sh_path.read_text()
-        patched = patch_solve_sh(original, repo, commit)
-        if patched != original:
-            if not dry_run:
-                solve_sh_path.write_text(patched)
-            changes["solve.sh"] = True
-        else:
-            changes["solve.sh"] = False
+        # Dedent first (original has 8 spaces of indentation)
+        dedented = dedent_sh(original)
+        patched = patch_solve_sh(dedented, repo, commit)
+        if not dry_run:
+            solve_sh_path.write_text(patched)
+        changes["solve.sh"] = True
     else:
         changes["solve.sh"] = False
 
