@@ -10,7 +10,7 @@ RUN apt-get update && \
         build-essential pkg-config ca-certificates curl jq wget \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --break-system-packages \
+RUN python3 -m pip install \
     "pandas>=1.5,<3" \
     "numpy>=1.20" \
     "boto3" \

@@ -12,11 +12,11 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install torch CPU-only (pre-built wheel, ~800MB but no compilation)
-RUN python3 -m pip install --break-system-packages \
+RUN python3 -m pip install \
     torch --index-url https://download.pytorch.org/whl/cpu
 
 # Install MONAI and all its test deps
-RUN python3 -m pip install --break-system-packages \
+RUN python3 -m pip install \
     "monai" \
     "numpy>=1.20" \
     "nibabel" \

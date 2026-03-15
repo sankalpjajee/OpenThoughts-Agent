@@ -11,7 +11,7 @@ RUN apt-get update && \
         gfortran libopenblas-dev liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --break-system-packages \
+RUN python3 -m pip install \
     "numpy>=1.26,<3" \
     "python-dateutil>=2.8" \
     "pytz>=2020.1" \
