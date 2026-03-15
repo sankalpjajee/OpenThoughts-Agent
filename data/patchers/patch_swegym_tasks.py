@@ -1,26 +1,19 @@
-#!/usr/bin/env python3
 """
 patch_swegym_tasks.py
 ---------------------
 Patches DCAgent2/swegym-tasks to fix MissingDependency failures and reduce
 the number of unique Docker images to ≤ 11 (one per repo).
 
-Problem:
-  - Original Dockerfile: ubuntu:24.04 + git clone at specific commit
-    → Each task has a unique Dockerfile (2438 unique images)
-    → Missing heavy build deps (pandas needs Cython, MONAI needs torch, etc.)
-
-Fix strategy:
-  1. Dockerfile: Remove git clone (make it repo-specific, not commit-specific)
-     → Pre-install heavy deps for each repo
-     → 11 unique images instead of 2438
-  2. test.sh: Add git clone at runtime (clone repo + checkout specific commit)
-     → Fix ensure_dependencies to use --break-system-packages
-  3. solve.sh: Add git clone at runtime before applying patches
+Strategy:
+  1. Dockerfile: Pre-install the PyPI release of each repo's package
+     (pre-built wheels = no compilation needed at runtime)
+  2. test.sh: Clone repo at runtime, apply code fix, run pip install
+     --no-build-isolation -e . (reuses pre-installed compiled extensions)
+  3. solve.sh: Same as test.sh + also applies the code fix patch from config.json
 
 Usage:
     python3 data/patchers/patch_swegym_tasks.py \
-        --output-dir /tmp/swegym_patched_v1 \
+        --output-dir /tmp/swegym_patched_v5 \
         [--limit 10] [--dry-run]
 """
 
@@ -36,10 +29,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Per-repo Dockerfile templates (no git clone - that happens at runtime)
+# Per-repo Dockerfile templates
+# Pre-install PyPI packages (pre-built wheels) to avoid compilation at runtime
 # ---------------------------------------------------------------------------
 
-_DOCKERFILE_HEADER = """\
+_DOCKERFILE_BASE = """\
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -57,44 +51,71 @@ RUN apt-get update && \\
         ca-certificates \\
         curl \\
         jq \\
-"""
-
-_DOCKERFILE_FOOTER = """\
+    && rm -rf /var/lib/apt/lists/*
 ENV PATH="/root/.local/bin:$PATH"
 """
 
-# Per-repo extra apt packages and pip pre-installs
+# Per-repo: extra apt packages + pip packages to pre-install in Dockerfile
+# These are installed from PyPI (pre-built wheels) to avoid compilation
 REPO_DEPS = {
     "pandas-dev/pandas": {
-        "apt": ["cython3", "python3-numpy", "libhdf5-dev", "libopenblas-dev"],
-        "pip": ["cython", "numpy", "python-dateutil", "pytz"],
+        "apt": [],
+        # Install pandas + all its build deps as pre-built wheels
+        # --no-build-isolation at runtime will reuse these
+        "pip": [
+            "pandas",
+            "numpy",
+            "python-dateutil",
+            "pytz",
+            "cython",
+            "versioneer",
+            "pytest",
+            "pytest-xdist",
+        ],
+        # Runtime: use --no-build-isolation to reuse pre-installed compiled extensions
+        "install_flags": "--no-build-isolation",
     },
     "Project-MONAI/MONAI": {
         "apt": [],
-        # CPU-only torch to avoid 2GB GPU wheel
         "pip": [
             "torch --index-url https://download.pytorch.org/whl/cpu",
+            "monai",
             "numpy",
             "nibabel",
             "pillow",
             "scipy",
+            "pytest",
+            "pytest-xdist",
         ],
+        "install_flags": "--no-build-isolation",
     },
     "getmoto/moto": {
         "apt": [],
-        "pip": ["boto3", "botocore"],
+        "pip": [
+            "boto3",
+            "botocore",
+            "moto[all]",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "",
     },
     "python/mypy": {
         "apt": [],
         "pip": [
+            "mypy",
             "mypy-extensions>=1.0",
             "typing-extensions>=4.1",
             "tomli",
+            "pytest",
+            "pytest-xdist",
         ],
+        "install_flags": "--no-build-isolation",
     },
     "iterative/dvc": {
         "apt": [],
         "pip": [
+            "dvc",
             "gitpython",
             "shtab>=1.3.4",
             "voluptuous",
@@ -103,58 +124,103 @@ REPO_DEPS = {
             "shortuuid>=0.5",
             "diskcache>=5.2.1",
             "rich>=12",
+            "pytest",
+            "pytest-xdist",
         ],
+        "install_flags": "--no-build-isolation",
     },
     "dask/dask": {
         "apt": [],
-        "pip": ["numpy", "pandas", "toolz", "fsspec"],
+        "pip": [
+            "dask[complete]",
+            "numpy",
+            "pandas",
+            "toolz",
+            "fsspec",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "--no-build-isolation",
     },
     "modin-project/modin": {
         "apt": [],
-        "pip": ["pandas", "numpy"],
+        "pip": [
+            "modin[all]",
+            "pandas",
+            "numpy",
+            "boto3",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "--no-build-isolation",
     },
     "pydantic/pydantic": {
-        "apt": ["cargo", "rustc"],
-        "pip": ["maturin"],
+        "apt": [],
+        # pydantic v2 has pre-built wheels (pydantic-core), no Rust compilation needed
+        "pip": [
+            "pydantic",
+            "pydantic-core",
+            "annotated-types",
+            "typing-extensions",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "--no-build-isolation",
     },
     "conan-io/conan": {
         "apt": ["cmake"],
-        "pip": [],
+        "pip": [
+            "conan",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "--no-build-isolation",
     },
     "facebookresearch/hydra": {
         "apt": [],
-        "pip": ["omegaconf>=2.2", "antlr4-python3-runtime==4.9.3"],
+        "pip": [
+            "hydra-core",
+            "omegaconf>=2.2",
+            "antlr4-python3-runtime==4.9.3",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "--no-build-isolation",
     },
     "bokeh/bokeh": {
         "apt": ["nodejs", "npm"],
-        "pip": [],
+        "pip": [
+            "bokeh",
+            "pytest",
+            "pytest-xdist",
+        ],
+        "install_flags": "--no-build-isolation",
     },
 }
 
 
 def build_dockerfile(repo: str) -> str:
-    """Build a Dockerfile for the given repo with pre-installed deps."""
-    deps = REPO_DEPS.get(repo, {"apt": [], "pip": []})
+    """Build a Dockerfile for the given repo with pre-installed PyPI packages."""
+    deps = REPO_DEPS.get(repo, {"apt": [], "pip": [], "install_flags": ""})
     apt_pkgs = deps.get("apt", [])
     pip_pkgs = deps.get("pip", [])
 
-    lines = [_DOCKERFILE_HEADER]
+    lines = [_DOCKERFILE_BASE]
 
-    # Extra apt packages
+    # Extra apt packages (if any)
     if apt_pkgs:
+        lines.append("RUN apt-get update && apt-get install -y --no-install-recommends \\\n")
         for pkg in apt_pkgs:
             lines.append(f"        {pkg} \\\n")
+        lines.append("    && rm -rf /var/lib/apt/lists/*\n")
 
-    lines.append("    && rm -rf /var/lib/apt/lists/*\n")
-
-    # Pre-install pip packages
+    # Pre-install pip packages (pre-built wheels from PyPI)
     if pip_pkgs:
         for pkg in pip_pkgs:
             lines.append(
                 f"RUN python3 -m pip install --break-system-packages {pkg} || true\n"
             )
 
-    lines.append(_DOCKERFILE_FOOTER)
     return "".join(lines)
 
 
@@ -167,18 +233,23 @@ def build_clone_preamble(repo: str, commit: str) -> str:
     return f"""\
 # --- Runtime repo setup ---
 if [ ! -d /testbed/repo/.git ]; then
-    git clone --depth=1 https://github.com/{repo}.git /testbed/repo || \\
-    git clone https://github.com/{repo}.git /testbed/repo
-    cd /testbed/repo && git fetch --depth=1 origin {commit} && git checkout {commit}
+    git clone https://github.com/{repo}.git /testbed/repo 2>/dev/null || \\
+    git clone --depth=50 https://github.com/{repo}.git /testbed/repo
+    cd /testbed/repo && git fetch origin {commit} 2>/dev/null || git fetch --depth=50 origin {commit}
+    git checkout {commit}
 fi
 # --- End runtime repo setup ---
 """
 
 
-ENSURE_DEPS_FUNCTION = """\
-ensure_dependencies() {
-    log "Installing base Python tooling"
-    python3 -m pip install --break-system-packages --upgrade pip setuptools wheel || true
+def build_ensure_deps(repo: str) -> str:
+    """Build the ensure_dependencies function for the given repo."""
+    deps = REPO_DEPS.get(repo, {"install_flags": ""})
+    install_flags = deps.get("install_flags", "")
+
+    return f"""\
+ensure_dependencies() {{
+    log "Installing project dependencies"
 
     if [ -f requirements-dev.txt ]; then
         log "Installing requirements-dev.txt"
@@ -190,50 +261,20 @@ ensure_dependencies() {
         python3 -m pip install --break-system-packages -r requirements.txt || true
     fi
 
-    if [ -f pyproject.toml ] || [ -f setup.py ]; then
+    if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then
         log "Installing project in editable mode"
+        python3 -m pip install --break-system-packages {install_flags} -e . || \\
         python3 -m pip install --break-system-packages -e . || true
-        # Auto-discover and install all optional extras
-        cat > /tmp/_discover_extras.py << 'PYEOF'
-import ast, configparser, pathlib, re, sys
-try:
-    pp = pathlib.Path('pyproject.toml')
-    if pp.exists():
-        txt = pp.read_text()
-        m = re.search(r'\\[project\\.optional-dependencies\\](.+?)(?:\\n\\[|\\Z)', txt, re.S)
-        if m:
-            keys = re.findall(r'^(\\w[\\w-]*)\\s*=', m.group(1), re.M)
-            if keys: print(','.join(keys)); sys.exit(0)
-    cfg = pathlib.Path('setup.cfg')
-    if cfg.exists():
-        cp = configparser.ConfigParser(); cp.read(str(cfg))
-        if 'options.extras_require' in cp:
-            print(','.join(cp['options.extras_require'].keys())); sys.exit(0)
-    sp = pathlib.Path('setup.py')
-    if sp.exists():
-        tree = ast.parse(sp.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.keyword) and node.arg == 'extras_require':
-                if isinstance(node.value, ast.Dict):
-                    keys = [k.value for k in node.value.keys if isinstance(k, (ast.Constant, ast.Str))]
-                    if keys: print(','.join(keys)); sys.exit(0)
-except Exception: pass
-PYEOF
-        EXTRAS=$(python3 /tmp/_discover_extras.py 2>/dev/null)
-        if [ -n "$EXTRAS" ]; then
-            log "Installing extras: $EXTRAS"
-            python3 -m pip install --break-system-packages -e ".[$EXTRAS]" 2>/dev/null || true
-        fi
     fi
 
     python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true
-}"""
+}}"""
 
 
 def patch_test_sh(content: str, repo: str, commit: str) -> str:
     """Patch test.sh to:
     1. Clone the repo at runtime (before cd $REPO_DIR)
-    2. Fix ensure_dependencies to use --break-system-packages
+    2. Fix ensure_dependencies to use --break-system-packages + --no-build-isolation
     """
     # Step 1: Replace ensure_dependencies function
     start = content.find("ensure_dependencies()")
@@ -253,7 +294,7 @@ def patch_test_sh(content: str, repo: str, commit: str) -> str:
                 i += 1
             else:
                 end = len(content)
-            content = content[:start] + ENSURE_DEPS_FUNCTION + content[end:]
+            content = content[:start] + build_ensure_deps(repo) + content[end:]
 
     # Step 2: Add git clone before "cd $REPO_DIR"
     clone_preamble = build_clone_preamble(repo, commit)
@@ -266,7 +307,7 @@ def patch_test_sh(content: str, repo: str, commit: str) -> str:
 
 def patch_solve_sh(content: str, repo: str, commit: str, code_patch: str = "") -> str:
     """Patch solve.sh to clone the repo at runtime and apply the code fix.
-    
+
     The oracle needs to:
     1. Clone at base_commit (buggy code)
     2. Apply the code fix (from config.json["patch"])
@@ -278,8 +319,6 @@ def patch_solve_sh(content: str, repo: str, commit: str, code_patch: str = "") -
     # Build the code fix application snippet
     code_fix_snippet = ""
     if code_patch:
-        # Escape the patch content for embedding in a heredoc
-        # Use a unique delimiter unlikely to appear in patch content
         code_fix_snippet = f"""
 # --- Apply code fix (oracle: restore fixed code) ---
 code_fix_file="$(mktemp /tmp/swegym-code-fix-XXXX.diff)"
@@ -291,13 +330,12 @@ rm -f "$code_fix_file"
 # --- End code fix ---
 """
 
-    # The solve.sh starts with shebang and set -Eeuo pipefail, then cd /testbed/repo
     # Insert clone + code fix before the first cd /testbed/repo
     cd_marker = "cd /testbed/repo"
     if cd_marker in content and "git clone" not in content:
         content = content.replace(cd_marker, clone_preamble + cd_marker + code_fix_snippet, 1)
 
-    # Also fix pip calls to use --break-system-packages
+    # Fix pip calls to use --break-system-packages
     content = content.replace(
         "python3 -m pip install -e .",
         "python3 -m pip install --break-system-packages -e .",
@@ -316,7 +354,7 @@ rm -f "$code_fix_file"
 
 def dedent_sh(content: str) -> str:
     """Strip exactly 8 leading spaces from lines that start with 8 spaces.
-    
+
     The original swegym solve.sh and test.sh are indented by 8 spaces on all
     script lines, but heredoc content (diff lines) may start at column 0.
     We strip 8 spaces only from lines that have them.
@@ -332,7 +370,6 @@ def dedent_sh(content: str) -> str:
 
 def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = False) -> dict:
     """Patch a single extracted swegym task directory."""
-    import json
     changes = {}
 
     # Read code_patch from tests/config.json
@@ -357,7 +394,6 @@ def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = F
     test_sh_path = task_dir / "tests" / "test.sh"
     if test_sh_path.exists():
         original = test_sh_path.read_text()
-        # Dedent first (original has 8 spaces of indentation)
         dedented = dedent_sh(original)
         patched = patch_test_sh(dedented, repo, commit)
         if not dry_run:
@@ -370,7 +406,6 @@ def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = F
     solve_sh_path = task_dir / "solution" / "solve.sh"
     if solve_sh_path.exists():
         original = solve_sh_path.read_text()
-        # Dedent first (original has 8 spaces of indentation)
         dedented = dedent_sh(original)
         patched = patch_solve_sh(dedented, repo, commit, code_patch=code_patch)
         if not dry_run:
@@ -400,7 +435,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
-        default=pathlib.Path("/tmp/swegym_patched_v1"),
+        default=pathlib.Path("/tmp/swegym_patched_v5"),
         help="Output directory for patched tasks",
     )
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tasks")
