@@ -212,8 +212,13 @@ ensure_dependencies() {{
 
     if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then
         log "Installing project in editable mode"
-        python3 -m pip install --break-system-packages {install_flags} -e . || \\
-        python3 -m pip install --break-system-packages -e . || true
+        if [ "{repo}" = "getmoto/moto" ]; then
+            python3 -m pip install --break-system-packages {install_flags} -e .[all] || \
+            python3 -m pip install --break-system-packages -e .[all] || true
+        else
+            python3 -m pip install --break-system-packages {install_flags} -e . || \
+            python3 -m pip install --break-system-packages -e . || true
+        fi
     fi
 
     python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true
@@ -299,8 +304,13 @@ rm -f "$code_fix_file"
 if [ -f requirements.txt ]; then
     python3 -m pip install --break-system-packages -r requirements.txt || true
 fi
-python3 -m pip install --break-system-packages {install_flags} -e . || \\
-python3 -m pip install --break-system-packages -e . || true
+if [ "{repo}" = "getmoto/moto" ]; then
+    python3 -m pip install --break-system-packages {install_flags} -e .[all] || \
+    python3 -m pip install --break-system-packages -e .[all] || true
+else
+    python3 -m pip install --break-system-packages {install_flags} -e . || \
+    python3 -m pip install --break-system-packages -e . || true
+fi
 python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true
 # --- End install ---
 """
