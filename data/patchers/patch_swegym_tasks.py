@@ -34,9 +34,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Minimal Dockerfile (same for all repos - no pip installs to avoid timeout)
+# Dockerfile templates
 # ---------------------------------------------------------------------------
 
+# Minimal Dockerfile for pure-Python repos
 _DOCKERFILE_TEMPLATE = """\
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -60,6 +61,27 @@ RUN apt-get update && \\
 ENV PATH="/root/.local/bin:$PATH"
 """
 
+# Custom pre-built images for heavy compiled repos
+# Image already has compiled deps (pandas, torch, etc.) installed
+_CUSTOM_IMAGE_DOCKERFILE = """\
+FROM {image}
+WORKDIR /testbed
+RUN apt-get update && \\
+    apt-get install -y --no-install-recommends git jq curl wget \\
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/root/.local/bin:$PATH"
+"""
+
+# Map repo -> custom image (version-aware for pandas)
+REGISTRY = "ghcr.io/sankalpjajee"
+
+REPO_CUSTOM_IMAGES = {
+    "Project-MONAI/MONAI": f"{REGISTRY}/swegym-monai:latest",
+    "modin-project/modin": f"{REGISTRY}/swegym-modin:latest",
+    # pandas: version-specific images
+    # resolved at runtime based on config.json version field
+}
+
 # Per-repo extra apt packages (lightweight, fast to install)
 REPO_APT_DEPS = {
     "conan-io/conan": ["cmake"],
@@ -67,19 +89,20 @@ REPO_APT_DEPS = {
 }
 
 # Per-repo: pip packages to install at RUNTIME (in test.sh/solve.sh)
-# These are installed at runtime, not in the Dockerfile
-# Order matters: install heavy pre-built wheels first, then -e .
+# For custom-image repos (pandas, MONAI, modin), deps are already in the image.
+# Only need to install the project itself with --no-build-isolation.
 REPO_RUNTIME_DEPS = {
     "pandas-dev/pandas": [
-        # Install pre-built pandas wheel first (provides compiled .so files)
-        # Then --no-build-isolation reuses them for editable install
-        "numpy cython python-dateutil pytz",
-        "pandas --only-binary=:all: || true",  # pre-built wheel
+        # Deps already in custom image; just ensure cython/versioneer for editable install
+        "cython versioneer",
     ],
     "Project-MONAI/MONAI": [
-        # torch CPU-only pre-built wheel (~800MB but no compilation)
-        "torch --index-url https://download.pytorch.org/whl/cpu --only-binary=:all:",
-        "numpy nibabel pillow scipy",
+        # torch/numpy already in custom image; install extra test deps
+        "nibabel pillow scipy einops parameterized",
+    ],
+    "modin-project/modin": [
+        # pandas/numpy/boto3 already in custom image
+        "dask[complete]",
     ],
     "getmoto/moto": [
         "boto3 botocore",
@@ -124,8 +147,28 @@ REPO_INSTALL_FLAGS = {
 }
 
 
-def build_dockerfile(repo: str) -> str:
-    """Build a minimal Dockerfile for the given repo."""
+def build_dockerfile(repo: str, version: str = "") -> str:
+    """Build a Dockerfile for the given repo.
+    
+    For heavy compiled repos (pandas, MONAI, modin), uses a pre-built custom
+    image from ghcr.io that already has all compiled deps installed.
+    For pure-Python repos, uses a minimal ubuntu:24.04 image.
+    """
+    # pandas: version-specific custom images
+    if repo == "pandas-dev/pandas":
+        # Map version prefix to image tag
+        v = version.lstrip("v").split(".")[0] + "." + version.lstrip("v").split(".")[1] if "." in version.lstrip("v") else version.lstrip("v")
+        # Normalize: v2.1.x -> 2.1, v1.5.x -> 1.5, v3.0.x -> 3.0
+        major_minor = ".".join(version.lstrip("v").split(".")[:2])
+        image = f"{REGISTRY}/swegym-pandas-{major_minor}:latest"
+        return _CUSTOM_IMAGE_DOCKERFILE.format(image=image)
+
+    # Other heavy repos with single custom image
+    if repo in REPO_CUSTOM_IMAGES:
+        image = REPO_CUSTOM_IMAGES[repo]
+        return _CUSTOM_IMAGE_DOCKERFILE.format(image=image)
+
+    # Pure-Python repos: minimal ubuntu:24.04
     extra_apt = " ".join(REPO_APT_DEPS.get(repo, []))
     if not extra_apt:
         extra_apt = "wget"  # placeholder so the line isn't empty
@@ -313,9 +356,9 @@ def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = F
         except Exception:
             pass
 
-    # 1. Dockerfile - minimal, repo-specific only for apt packages
+    # 1. Dockerfile - custom image for heavy repos, minimal for pure-Python
     dockerfile_path = task_dir / "environment" / "Dockerfile"
-    new_dockerfile = build_dockerfile(repo)
+    new_dockerfile = build_dockerfile(repo, version=cfg.get("version", "") if config_path.exists() else "")
     if not dry_run:
         dockerfile_path.parent.mkdir(parents=True, exist_ok=True)
         dockerfile_path.write_text(new_dockerfile)
@@ -403,9 +446,11 @@ def main():
                 cfg = json.loads(config_path.read_text())
                 repo = cfg.get("repo", "unknown")
                 commit = cfg.get("base_commit", "main")
+                version = cfg.get("version", "")
             else:
                 repo = "unknown"
                 commit = "main"
+                version = ""
 
             repo_counts[repo] = repo_counts.get(repo, 0) + 1
 
