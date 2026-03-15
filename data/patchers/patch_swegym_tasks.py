@@ -264,15 +264,38 @@ def patch_test_sh(content: str, repo: str, commit: str) -> str:
     return content
 
 
-def patch_solve_sh(content: str, repo: str, commit: str) -> str:
-    """Patch solve.sh to clone the repo at runtime if not already present."""
+def patch_solve_sh(content: str, repo: str, commit: str, code_patch: str = "") -> str:
+    """Patch solve.sh to clone the repo at runtime and apply the code fix.
+    
+    The oracle needs to:
+    1. Clone at base_commit (buggy code)
+    2. Apply the code fix (from config.json["patch"])
+    3. Apply the test patch (already in solve.sh)
+    4. Run tests -> should pass
+    """
     clone_preamble = build_clone_preamble(repo, commit)
 
+    # Build the code fix application snippet
+    code_fix_snippet = ""
+    if code_patch:
+        # Escape the patch content for embedding in a heredoc
+        # Use a unique delimiter unlikely to appear in patch content
+        code_fix_snippet = f"""
+# --- Apply code fix (oracle: restore fixed code) ---
+code_fix_file="$(mktemp /tmp/swegym-code-fix-XXXX.diff)"
+cat <<'CODE_FIX_EOF' > "$code_fix_file"
+{code_patch}
+CODE_FIX_EOF
+git apply --whitespace=nowarn --apply "$code_fix_file" || git apply --whitespace=fix --apply "$code_fix_file" || true
+rm -f "$code_fix_file"
+# --- End code fix ---
+"""
+
     # The solve.sh starts with shebang and set -Eeuo pipefail, then cd /testbed/repo
-    # Insert clone before the first cd /testbed/repo
+    # Insert clone + code fix before the first cd /testbed/repo
     cd_marker = "cd /testbed/repo"
     if cd_marker in content and "git clone" not in content:
-        content = content.replace(cd_marker, clone_preamble + cd_marker, 1)
+        content = content.replace(cd_marker, clone_preamble + cd_marker + code_fix_snippet, 1)
 
     # Also fix pip calls to use --break-system-packages
     content = content.replace(
@@ -309,7 +332,18 @@ def dedent_sh(content: str) -> str:
 
 def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = False) -> dict:
     """Patch a single extracted swegym task directory."""
+    import json
     changes = {}
+
+    # Read code_patch from tests/config.json
+    code_patch = ""
+    config_path = task_dir / "tests" / "config.json"
+    if config_path.exists():
+        try:
+            cfg = json.loads(config_path.read_text())
+            code_patch = cfg.get("patch", "")
+        except Exception:
+            pass
 
     # 1. Dockerfile - repo-specific, no git clone
     dockerfile_path = task_dir / "environment" / "Dockerfile"
@@ -332,13 +366,13 @@ def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = F
     else:
         changes["test.sh"] = False
 
-    # 3. solve.sh - dedent + add git clone
+    # 3. solve.sh - dedent + add git clone + embed code fix
     solve_sh_path = task_dir / "solution" / "solve.sh"
     if solve_sh_path.exists():
         original = solve_sh_path.read_text()
         # Dedent first (original has 8 spaces of indentation)
         dedented = dedent_sh(original)
-        patched = patch_solve_sh(dedented, repo, commit)
+        patched = patch_solve_sh(dedented, repo, commit, code_patch=code_patch)
         if not dry_run:
             solve_sh_path.write_text(patched)
         changes["solve.sh"] = True
