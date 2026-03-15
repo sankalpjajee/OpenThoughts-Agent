@@ -149,8 +149,6 @@ def build_dockerfile(repo: str) -> str:
 
     # Pre-install pip packages
     if pip_pkgs:
-        lines.append("RUN python3 -m pip install --break-system-packages \\\n")
-        lines.append("    --upgrade pip setuptools wheel\n")
         for pkg in pip_pkgs:
             lines.append(
                 f"RUN python3 -m pip install --break-system-packages {pkg} || true\n"
