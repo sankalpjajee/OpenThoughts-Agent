@@ -10,15 +10,17 @@ installed at runtime in test.sh/solve.sh.
 
 Strategy:
   1. Dockerfile: Minimal ubuntu:24.04 with only apt packages (no pip installs)
+     - For heavy compiled repos (pandas, MONAI, modin): use pre-built custom
+       image from ghcr.io that already has all compiled deps installed
   2. test.sh: Clone repo at runtime, install deps, run tests
-     - For compiled packages (pandas, MONAI): install pre-built wheel from PyPI
-       then pip install --no-build-isolation -e .
-     - For pure Python (moto, mypy, dvc): pip install -e . with extras
-  3. solve.sh: Same + also applies the code fix patch from config.json
+     - For moto: pip install -e .[all] to get all extras
+     - For compiled packages (pandas, MONAI): pip install --no-build-isolation -e .
+     - For pure Python (mypy, dvc): pip install -e .
+  3. solve.sh: Same as test.sh + also applies the code fix patch from config.json
 
 Usage:
-    python3 data/patchers/patch_swegym_tasks.py \
-        --output-dir /tmp/swegym_patched_v6 \
+    python3 data/patchers/patch_swegym_tasks.py \\
+        --output-dir /tmp/swegym_patched_v9 \\
         [--limit 10] [--dry-run]
 """
 
@@ -78,8 +80,7 @@ REGISTRY = "ghcr.io/sankalpjajee"
 REPO_CUSTOM_IMAGES = {
     "Project-MONAI/MONAI": f"{REGISTRY}/swegym-monai:latest",
     "modin-project/modin": f"{REGISTRY}/swegym-modin:latest",
-    # pandas: version-specific images
-    # resolved at runtime based on config.json version field
+    # pandas: version-specific images resolved at runtime based on config.json version field
 }
 
 # Per-repo extra apt packages (lightweight, fast to install)
@@ -90,18 +91,14 @@ REPO_APT_DEPS = {
 
 # Per-repo: pip packages to install at RUNTIME (in test.sh/solve.sh)
 # For custom-image repos (pandas, MONAI, modin), deps are already in the image.
-# Only need to install the project itself with --no-build-isolation.
 REPO_RUNTIME_DEPS = {
     "pandas-dev/pandas": [
-        # Deps already in custom image; just ensure cython/versioneer for editable install
         "cython versioneer",
     ],
     "Project-MONAI/MONAI": [
-        # torch/numpy already in custom image; install extra test deps
         "nibabel pillow scipy einops parameterized",
     ],
     "modin-project/modin": [
-        # pandas/numpy/boto3 already in custom image
         "dask[complete]",
     ],
     "getmoto/moto": [
@@ -117,11 +114,7 @@ REPO_RUNTIME_DEPS = {
     "dask/dask": [
         "numpy pandas toolz fsspec",
     ],
-    "modin-project/modin": [
-        "pandas numpy boto3",
-    ],
     "pydantic/pydantic": [
-        # pydantic-core has pre-built wheels (no Rust compilation)
         "pydantic-core annotated-types typing-extensions",
     ],
     "facebookresearch/hydra": [
@@ -132,7 +125,6 @@ REPO_RUNTIME_DEPS = {
 }
 
 # For compiled packages, use --no-build-isolation at editable install time
-# so it reuses the pre-installed compiled extensions
 REPO_INSTALL_FLAGS = {
     "pandas-dev/pandas": "--no-build-isolation",
     "Project-MONAI/MONAI": "--no-build-isolation",
@@ -146,19 +138,16 @@ REPO_INSTALL_FLAGS = {
     "bokeh/bokeh": "--no-build-isolation",
 }
 
+# Repos that need extras installed (e.g. moto[all])
+REPO_INSTALL_EXTRAS = {
+    "getmoto/moto": "[all]",
+}
+
 
 def build_dockerfile(repo: str, version: str = "") -> str:
-    """Build a Dockerfile for the given repo.
-    
-    For heavy compiled repos (pandas, MONAI, modin), uses a pre-built custom
-    image from ghcr.io that already has all compiled deps installed.
-    For pure-Python repos, uses a minimal ubuntu:24.04 image.
-    """
+    """Build a Dockerfile for the given repo."""
     # pandas: version-specific custom images
     if repo == "pandas-dev/pandas":
-        # Map version prefix to image tag
-        v = version.lstrip("v").split(".")[0] + "." + version.lstrip("v").split(".")[1] if "." in version.lstrip("v") else version.lstrip("v")
-        # Normalize: v2.1.x -> 2.1, v1.5.x -> 1.5, v3.0.x -> 3.0
         major_minor = ".".join(version.lstrip("v").split(".")[:2])
         image = f"{REGISTRY}/swegym-pandas-{major_minor}:latest"
         return _CUSTOM_IMAGE_DOCKERFILE.format(image=image)
@@ -171,19 +160,19 @@ def build_dockerfile(repo: str, version: str = "") -> str:
     # Pure-Python repos: minimal ubuntu:24.04
     extra_apt = " ".join(REPO_APT_DEPS.get(repo, []))
     if not extra_apt:
-        extra_apt = "wget"  # placeholder so the line isn't empty
+        extra_apt = "wget"
     return _DOCKERFILE_TEMPLATE.format(extra_apt=extra_apt)
 
 
 def build_runtime_install_snippet(repo: str) -> str:
-    """Build shell snippet to install runtime deps before pip install -e ."""
+    """Build shell snippet to install runtime deps."""
     pkgs = REPO_RUNTIME_DEPS.get(repo, [])
     if not pkgs:
         return ""
     lines = ["# --- Install runtime dependencies ---"]
     for pkg_line in pkgs:
         lines.append(
-            f"python3 -m pip install --break-system-packages {pkg_line} || true"
+            "python3 -m pip install --break-system-packages " + pkg_line + " || true"
         )
     lines.append("# --- End runtime dependencies ---")
     return "\n".join(lines) + "\n"
@@ -192,52 +181,66 @@ def build_runtime_install_snippet(repo: str) -> str:
 def build_ensure_deps(repo: str) -> str:
     """Build the ensure_dependencies function for the given repo."""
     install_flags = REPO_INSTALL_FLAGS.get(repo, "")
+    extras = REPO_INSTALL_EXTRAS.get(repo, "")
     runtime_install = build_runtime_install_snippet(repo)
 
-    return f"""\
-ensure_dependencies() {{
-    log "Installing project dependencies"
+    # Build the pip install line carefully (no Python f-string backslash issues)
+    pip_install_line = (
+        "python3 -m pip install --break-system-packages "
+        + install_flags
+        + " -e ."
+        + extras
+        + " || \\\n"
+        + "        python3 -m pip install --break-system-packages -e ."
+        + extras
+        + " || true"
+    )
 
-    {runtime_install}
-
-    if [ -f requirements-dev.txt ]; then
-        log "Installing requirements-dev.txt"
-        python3 -m pip install --break-system-packages -r requirements-dev.txt || true
-    fi
-
-    if [ -f requirements.txt ]; then
-        log "Installing requirements.txt"
-        python3 -m pip install --break-system-packages -r requirements.txt || true
-    fi
-
-    if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then
-        log "Installing project in editable mode"
-        if [ "{repo}" = "getmoto/moto" ]; then
-            python3 -m pip install --break-system-packages {install_flags} -e .[all] || \
-            python3 -m pip install --break-system-packages -e .[all] || true
-        else
-            python3 -m pip install --break-system-packages {install_flags} -e . || \
-            python3 -m pip install --break-system-packages -e . || true
-        fi
-    fi
-
-    python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true
-}}"""
+    lines = [
+        "ensure_dependencies() {",
+        '    log "Installing project dependencies"',
+        "",
+    ]
+    if runtime_install:
+        lines.append("    " + runtime_install.replace("\n", "\n    ").rstrip())
+        lines.append("")
+    lines += [
+        "    if [ -f requirements-dev.txt ]; then",
+        '        log "Installing requirements-dev.txt"',
+        "        python3 -m pip install --break-system-packages -r requirements-dev.txt || true",
+        "    fi",
+        "",
+        "    if [ -f requirements.txt ]; then",
+        '        log "Installing requirements.txt"',
+        "        python3 -m pip install --break-system-packages -r requirements.txt || true",
+        "    fi",
+        "",
+        "    if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then",
+        '        log "Installing project in editable mode"',
+        "        " + pip_install_line,
+        "    fi",
+        "",
+        '    python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true',
+        "}",
+    ]
+    return "\n".join(lines)
 
 
 def build_clone_preamble(repo: str, commit: str) -> str:
     """Shell snippet to clone the repo at the specific commit at runtime."""
-    return f"""\
-# --- Runtime repo setup ---
-if [ ! -d /testbed/repo/.git ]; then
-    git clone https://github.com/{repo}.git /testbed/repo 2>/dev/null || \\
-    git clone --depth=100 https://github.com/{repo}.git /testbed/repo
-fi
-cd /testbed/repo
-git fetch origin {commit} 2>/dev/null || git fetch --depth=100 origin {commit} 2>/dev/null || true
-git checkout {commit} 2>/dev/null || git checkout -b work_{commit[:8]} {commit} 2>/dev/null || true
-# --- End runtime repo setup ---
-"""
+    lines = [
+        "# --- Runtime repo setup ---",
+        "if [ ! -d /testbed/repo/.git ]; then",
+        "    git clone https://github.com/" + repo + ".git /testbed/repo 2>/dev/null || \\",
+        "    git clone --depth=100 https://github.com/" + repo + ".git /testbed/repo",
+        "fi",
+        "cd /testbed/repo",
+        "git fetch origin " + commit + " 2>/dev/null || git fetch --depth=100 origin " + commit + " 2>/dev/null || true",
+        "git checkout " + commit + " 2>/dev/null || git checkout -b work_" + commit[:8] + " " + commit + " 2>/dev/null || true",
+        "# --- End runtime repo setup ---",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def patch_test_sh(content: str, repo: str, commit: str) -> str:
@@ -281,39 +284,54 @@ def patch_solve_sh(content: str, repo: str, commit: str, code_patch: str = "") -
     # Build the code fix application snippet
     code_fix_snippet = ""
     if code_patch:
-        code_fix_snippet = f"""
-# --- Apply code fix (oracle: restore fixed code) ---
-code_fix_file="$(mktemp /tmp/swegym-code-fix-XXXX.diff)"
-cat <<'CODE_FIX_EOF' > "$code_fix_file"
-{code_patch}
-CODE_FIX_EOF
-git apply --whitespace=nowarn --apply "$code_fix_file" || \\
-git apply --whitespace=fix --apply "$code_fix_file" || \\
-patch -p1 --forward < "$code_fix_file" || true
-rm -f "$code_fix_file"
-# --- End code fix ---
-"""
+        code_fix_lines = [
+            "",
+            "# --- Apply code fix (oracle: restore fixed code) ---",
+            'code_fix_file="$(mktemp /tmp/swegym-code-fix-XXXX.diff)"',
+            "cat <<'CODE_FIX_EOF' > \"$code_fix_file\"",
+            code_patch,
+            "CODE_FIX_EOF",
+            "git apply --whitespace=nowarn --apply \"$code_fix_file\" || \\",
+            "git apply --whitespace=fix --apply \"$code_fix_file\" || \\",
+            "patch -p1 --forward < \"$code_fix_file\" || true",
+            "rm -f \"$code_fix_file\"",
+            "# --- End code fix ---",
+            "",
+        ]
+        code_fix_snippet = "\n".join(code_fix_lines)
 
     # Runtime dep install snippet for solve.sh
     runtime_install = build_runtime_install_snippet(repo)
     install_flags = REPO_INSTALL_FLAGS.get(repo, "")
+    extras = REPO_INSTALL_EXTRAS.get(repo, "")
 
-    install_snippet = f"""
-# --- Install dependencies ---
-{runtime_install}
-if [ -f requirements.txt ]; then
-    python3 -m pip install --break-system-packages -r requirements.txt || true
-fi
-if [ "{repo}" = "getmoto/moto" ]; then
-    python3 -m pip install --break-system-packages {install_flags} -e .[all] || \
-    python3 -m pip install --break-system-packages -e .[all] || true
-else
-    python3 -m pip install --break-system-packages {install_flags} -e . || \
-    python3 -m pip install --break-system-packages -e . || true
-fi
-python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true
-# --- End install ---
-"""
+    pip_install_line = (
+        "python3 -m pip install --break-system-packages "
+        + install_flags
+        + " -e ."
+        + extras
+        + " || \\\n"
+        + "python3 -m pip install --break-system-packages -e ."
+        + extras
+        + " || true"
+    )
+
+    install_lines = [
+        "",
+        "# --- Install dependencies ---",
+    ]
+    if runtime_install:
+        install_lines.append(runtime_install.rstrip())
+    install_lines += [
+        "if [ -f requirements.txt ]; then",
+        "    python3 -m pip install --break-system-packages -r requirements.txt || true",
+        "fi",
+        pip_install_line,
+        'python3 -m pip install --break-system-packages "pytest>=8.0.0" "pytest-xdist>=3.5.0" || true',
+        "# --- End install ---",
+        "",
+    ]
+    install_snippet = "\n".join(install_lines)
 
     # Insert clone + code fix + install before the first cd /testbed/repo
     cd_marker = "cd /testbed/repo"
@@ -358,17 +376,19 @@ def patch_task(task_dir: pathlib.Path, repo: str, commit: str, dry_run: bool = F
 
     # Read code_patch from tests/config.json
     code_patch = ""
+    version = ""
     config_path = task_dir / "tests" / "config.json"
     if config_path.exists():
         try:
             cfg = json.loads(config_path.read_text())
             code_patch = cfg.get("patch", "")
+            version = cfg.get("version", "")
         except Exception:
             pass
 
     # 1. Dockerfile - custom image for heavy repos, minimal for pure-Python
     dockerfile_path = task_dir / "environment" / "Dockerfile"
-    new_dockerfile = build_dockerfile(repo, version=cfg.get("version", "") if config_path.exists() else "")
+    new_dockerfile = build_dockerfile(repo, version=version)
     if not dry_run:
         dockerfile_path.parent.mkdir(parents=True, exist_ok=True)
         dockerfile_path.write_text(new_dockerfile)
@@ -419,7 +439,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
-        default=pathlib.Path("/tmp/swegym_patched_v6"),
+        default=pathlib.Path("/tmp/swegym_patched_v9"),
         help="Output directory for patched tasks",
     )
     parser.add_argument("--limit", type=int, default=None, help="Limit number of tasks")
@@ -432,14 +452,12 @@ def main():
     args = parser.parse_args()
 
     from datasets import load_dataset
-
     log.info(f"Loading dataset {args.repo_id}...")
     ds = load_dataset(args.repo_id, split="train")
     total = len(ds) if args.limit is None else min(args.limit, len(ds))
     log.info(f"Processing {total} tasks...")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-
     stats = {"patched": 0, "errors": 0}
     repo_counts = {}
 
@@ -447,29 +465,21 @@ def main():
         row = ds[i]
         task_name = row["path"]
         task_binary = bytes(row["task_binary"])
-
         try:
             task_dir = extract_task(task_binary, task_name, args.output_dir)
-
             config_path = task_dir / "tests" / "config.json"
             if config_path.exists():
                 cfg = json.loads(config_path.read_text())
                 repo = cfg.get("repo", "unknown")
                 commit = cfg.get("base_commit", "main")
-                version = cfg.get("version", "")
             else:
                 repo = "unknown"
                 commit = "main"
-                version = ""
-
             repo_counts[repo] = repo_counts.get(repo, 0) + 1
-
             changes = patch_task(task_dir, repo, commit, dry_run=args.dry_run)
             stats["patched"] += 1
-
             if i % 100 == 0:
                 log.info(f"  [{i}/{total}] {task_name} repo={repo} commit={commit[:12]} changes={changes}")
-
         except Exception as e:
             log.error(f"  [{i}] {task_name} ERROR: {e}")
             stats["errors"] += 1
