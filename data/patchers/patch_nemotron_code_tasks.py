@@ -444,7 +444,7 @@ def patch_tasks(
             print(f"  [{path}] Error repacking: {e}")
             continue
 
-        patched_rows.append({"path": path, "task_binary": list(new_binary)})
+        patched_rows.append({"path": path, "task_binary": new_binary})
         stats["patched"] += 1
 
         if i % 1000 == 0 and i > 0:
@@ -454,7 +454,12 @@ def patch_tasks(
 
     # Save as HuggingFace dataset
     if patched_rows:
-        out_ds = Dataset.from_list(patched_rows)
+        from datasets import Features, Value
+        features = Features({
+            "path": Value("string"),
+            "task_binary": Value("binary"),
+        })
+        out_ds = Dataset.from_list(patched_rows, features=features)
         out_ds.save_to_disk(output_dir)
         print(f"Saved {len(patched_rows)} patched tasks to {output_dir}")
 
