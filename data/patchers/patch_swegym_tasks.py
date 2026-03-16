@@ -226,20 +226,41 @@ def build_ensure_deps(repo: str) -> str:
     return "\n".join(lines)
 
 
-def build_clone_preamble(repo: str, commit: str) -> str:
-    """Shell snippet to clone the repo at the specific commit at runtime."""
-    lines = [
-        "# --- Runtime repo setup ---",
-        "if [ ! -d /testbed/repo/.git ]; then",
-        "    git clone https://github.com/" + repo + ".git /testbed/repo 2>/dev/null || \\",
-        "    git clone --depth=100 https://github.com/" + repo + ".git /testbed/repo",
-        "fi",
-        "cd /testbed/repo",
-        "git fetch origin " + commit + " 2>/dev/null || git fetch --depth=100 origin " + commit + " 2>/dev/null || true",
-        "git checkout " + commit + " 2>/dev/null || git checkout -b work_" + commit[:8] + " " + commit + " 2>/dev/null || true",
-        "# --- End runtime repo setup ---",
-        "",
-    ]
+def build_clone_preamble(repo: str, commit: str, skip_checkout_if_exists: bool = False) -> str:
+    """Shell snippet to clone the repo at the specific commit at runtime.
+    
+    If skip_checkout_if_exists=True, skip the git checkout if the repo already
+    exists (e.g. solve.sh already set it up with fixes applied).
+    """
+    if skip_checkout_if_exists:
+        # test.sh: only clone+checkout if repo doesn't already exist
+        # If solve.sh already ran, the repo has fixes applied — don't revert them
+        lines = [
+            "# --- Runtime repo setup ---",
+            "if [ ! -d /testbed/repo/.git ]; then",
+            "    git clone https://github.com/" + repo + ".git /testbed/repo 2>/dev/null || \\",
+            "    git clone --depth=100 https://github.com/" + repo + ".git /testbed/repo",
+            "    cd /testbed/repo",
+            "    git fetch origin " + commit + " 2>/dev/null || git fetch --depth=100 origin " + commit + " 2>/dev/null || true",
+            "    git checkout " + commit + " 2>/dev/null || git checkout -b work_" + commit[:8] + " " + commit + " 2>/dev/null || true",
+            "fi",
+            "# --- End runtime repo setup ---",
+            "",
+        ]
+    else:
+        # solve.sh: always clone and checkout the specific commit
+        lines = [
+            "# --- Runtime repo setup ---",
+            "if [ ! -d /testbed/repo/.git ]; then",
+            "    git clone https://github.com/" + repo + ".git /testbed/repo 2>/dev/null || \\",
+            "    git clone --depth=100 https://github.com/" + repo + ".git /testbed/repo",
+            "fi",
+            "cd /testbed/repo",
+            "git fetch origin " + commit + " 2>/dev/null || git fetch --depth=100 origin " + commit + " 2>/dev/null || true",
+            "git checkout " + commit + " 2>/dev/null || git checkout -b work_" + commit[:8] + " " + commit + " 2>/dev/null || true",
+            "# --- End runtime repo setup ---",
+            "",
+        ]
     return "\n".join(lines)
 
 
@@ -269,10 +290,11 @@ def patch_test_sh(content: str, repo: str, commit: str) -> str:
             content = content[:start] + build_ensure_deps(repo) + content[end:]
 
     # Step 2: Add git clone before "cd $REPO_DIR"
-    clone_preamble = build_clone_preamble(repo, commit)
+    # Use skip_checkout_if_exists=True so test.sh doesn't revert fixes applied by solve.sh
+    clone_preamble = build_clone_preamble(repo, commit, skip_checkout_if_exists=True)
     cd_marker = 'cd "$REPO_DIR"'
     if cd_marker in content and "git clone" not in content:
-        content = content.replace(cd_marker, clone_preamble + cd_marker, 1)
+        content = content.replace(cd_marker, clone_preamble + 'cd /testbed/repo\n', 1)
 
     return content
 
