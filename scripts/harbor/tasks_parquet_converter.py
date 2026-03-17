@@ -243,8 +243,18 @@ def _sanitize_tar_member_name(name: str) -> str:
     return str(PurePosixPath(*parts))
 
 
+def _mkdir_safe(path: Path) -> None:
+    """Create directory, tolerating race conditions from parallel workers."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        # Race condition: another worker created it between the check and mkdir
+        if not path.is_dir():
+            raise
+
+
 def safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_safe(dest_dir)
     buf = io.BytesIO(archive_bytes)
     with tarfile.open(fileobj=buf, mode="r:*") as tf:
         for member in tf.getmembers():
@@ -252,7 +262,7 @@ def safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
             member_name = _sanitize_tar_member_name(member.name)
             if not member_name or member_name.endswith("/"):
                 # Directory entry; ensure exists
-                (dest_dir / member_name).mkdir(parents=True, exist_ok=True)
+                _mkdir_safe(dest_dir / member_name)
                 continue
             if ".snapshot" in PurePosixPath(member_name).parts:
                 # Skip snapshot metadata that can be read-only on shared filesystems
@@ -261,7 +271,7 @@ def safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
             if not _is_within(dest_dir, target):
                 raise RuntimeError(f"Unsafe path in archive: {member.name}")
             # Ensure parent exists
-            target.parent.mkdir(parents=True, exist_ok=True)
+            _mkdir_safe(target.parent)
             # Extract regular files only; skip devices/symlinks for safety
             if member.isfile():
                 with tf.extractfile(member) as src:  # type: ignore[assignment]
@@ -270,7 +280,7 @@ def safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
                     with open(target, "wb") as dst:
                         dst.write(src.read())
             elif member.isdir():
-                target.mkdir(parents=True, exist_ok=True)
+                _mkdir_safe(target)
             else:
                 # Skip other types (symlinks, etc.) for safety
                 continue
