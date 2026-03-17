@@ -46,7 +46,11 @@ _TEST_SH = """\
 #!/usr/bin/env bash
 set -euo pipefail
 
-REWARD_FILE="${REWARD_FILE:-/tmp/reward}"
+LOG_DIR="/logs"
+VERIFIER_DIR="/logs/verifier"
+REWARD_FILE="$VERIFIER_DIR/reward.txt"
+
+mkdir -p "$LOG_DIR" "$VERIFIER_DIR"
 echo 0 > "$REWARD_FILE"
 
 log() { echo "[test] $*" >&2; }
@@ -120,7 +124,7 @@ exit 0
 _TEST_STATE_PY = """\
 import os
 
-REWARD_FILE = os.environ.get("REWARD_FILE", "/tmp/reward")
+REWARD_FILE = os.environ.get("REWARD_FILE", "/logs/verifier/reward.txt")
 
 
 def get_reward() -> float:
