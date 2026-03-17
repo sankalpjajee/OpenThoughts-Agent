@@ -266,7 +266,24 @@ def safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
     _mkdir_safe(dest_dir)
     buf = io.BytesIO(archive_bytes)
     with tarfile.open(fileobj=buf, mode="r:*") as tf:
-        for member in tf.getmembers():
+        members = tf.getmembers()
+
+        # Pre-scan: collect all names that appear as parent directories of other members.
+        # Some tarballs (e.g. penfever nemotron) list a path like 'environment' as a
+        # regular file entry AND also have 'environment/Dockerfile' as a child. We must
+        # treat such paths as directories and skip writing them as files.
+        all_names = set()
+        for m in members:
+            n = _sanitize_tar_member_name(m.name)
+            if n:
+                all_names.add(n)
+        implicit_dirs: set[str] = set()
+        for n in all_names:
+            parts = PurePosixPath(n).parts
+            for i in range(1, len(parts)):
+                implicit_dirs.add(str(PurePosixPath(*parts[:i])))
+
+        for member in members:
             # Sanitize name
             member_name = _sanitize_tar_member_name(member.name)
             if not member_name or member_name.endswith("/"):
@@ -275,6 +292,11 @@ def safe_extract_tar(archive_bytes: bytes, dest_dir: Path) -> None:
                 continue
             if ".snapshot" in PurePosixPath(member_name).parts:
                 # Skip snapshot metadata that can be read-only on shared filesystems
+                continue
+            # If this member's name is also a parent directory of another member,
+            # treat it as a directory (not a file) to avoid NotADirectoryError.
+            if member_name in implicit_dirs:
+                _mkdir_safe(dest_dir / member_name)
                 continue
             target = (dest_dir / member_name).resolve()
             if not _is_within(dest_dir, target):
