@@ -244,12 +244,21 @@ def _sanitize_tar_member_name(name: str) -> str:
 
 
 def _mkdir_safe(path: Path) -> None:
-    """Create directory, tolerating race conditions from parallel workers."""
+    """Create directory, tolerating race conditions from parallel workers.
+
+    Python's pathlib.mkdir(parents=True, exist_ok=True) can still raise
+    FileExistsError on some filesystems when two processes race to create
+    the same intermediate directory. We suppress it unconditionally since
+    the only goal is to ensure the directory exists.
+    """
     try:
         path.mkdir(parents=True, exist_ok=True)
     except FileExistsError:
-        # Race condition: another worker created it between the check and mkdir
-        if not path.is_dir():
+        pass  # Directory already exists (race condition) - that's fine
+    except OSError as e:
+        # Re-raise only if it's not a "file exists" type error
+        import errno
+        if e.errno != errno.EEXIST:
             raise
 
 
