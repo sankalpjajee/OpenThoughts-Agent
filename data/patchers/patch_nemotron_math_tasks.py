@@ -64,7 +64,7 @@ if [ ! -f /app/solution.txt ]; then
 fi
 
 ACTUAL=$(cat /app/solution.txt | tr -d '\\r' | sed 's/[[:space:]]*$//' | sed '/^$/d')
-EXPECTED=$(cat /app/expected.txt | tr -d '\\r' | sed 's/[[:space:]]*$//' | sed '/^$/d')
+EXPECTED=$(cat /tests/expected.txt | tr -d '\\r' | sed 's/[[:space:]]*$//' | sed '/^$/d')
 
 # ---------------------------------------------------------------------------
 # Exact string comparison (case-insensitive, whitespace-normalized)
