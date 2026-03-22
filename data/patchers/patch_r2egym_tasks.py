@@ -86,16 +86,17 @@ def _build_dockerfile(base_image: str, metadata_json_str: str) -> str:
     """
     Build a Daytona-compatible Dockerfile that:
     1. Inherits from the r2egym base image (which has the fixed code).
-    2. Writes metadata.json inline (no COPY needed — avoids build-context issues).
+    2. Writes metadata.json inline via base64 (single-line, no Dockerfile parse issues).
     3. Creates /logs directory for the reward file.
     """
-    # Escape the JSON for embedding in a shell heredoc
-    # Use printf with hex escaping to be safe with special characters
-    escaped = metadata_json_str.replace('\\', '\\\\').replace("'", "'\\''")
+    import base64
+    # Encode as base64 so the JSON never contains newlines or special chars
+    # that would confuse the Dockerfile parser.
+    b64 = base64.b64encode(metadata_json_str.encode('utf-8')).decode('ascii')
     return (
         f"FROM {base_image}\n"
         f"RUN mkdir -p /workspace /logs/verifier\n"
-        f"RUN printf '%s' '{escaped}' > /workspace/metadata.json\n"
+        f"RUN echo '{b64}' | base64 -d > /workspace/metadata.json\n"
         f"WORKDIR /testbed\n"
     )
 
