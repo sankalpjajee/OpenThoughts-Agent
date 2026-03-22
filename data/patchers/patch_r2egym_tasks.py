@@ -11,11 +11,10 @@ Each task in the r2egym_sandboxes dataset already has:
   - tests/test.sh        (verifier: runs /root/run_tests.sh, calculates reward,
                           writes to /logs/verifier/reward.txt)
 
-This patcher adds:
-  - solution/solve.sh    (oracle: no-op, because the docker image already has
-                          the FIXED code at the tagged commit; the verifier
-                          test.sh handles everything)
-  - tests/test_state.py  (Harbor test-state reader)
+This patcher adds / modifies:
+  - solution/solve.sh         (oracle: no-op, docker image has the FIXED code)
+  - tests/test_state.py       (Harbor reward reader)
+  - environment/Dockerfile    (COPY workspace replaced with inline RUN)
 
 Why no-op oracle?
   The docker images are named `namanjain12/<repo>_final:<commit_hash>` where
@@ -23,6 +22,12 @@ Why no-op oracle?
   correct code already applied.  The existing test.sh runs the unit tests and
   writes 1.0 to /logs/verifier/reward.txt when they all pass — so the oracle
   just needs to let the verifier run without modifying anything.
+
+Why rewrite the Dockerfile?
+  The original Dockerfile contains `COPY workspace /workspace` which requires
+  a build context directory.  Daytona's Image.from_dockerfile() sends only the
+  Dockerfile content, not surrounding files, so the COPY fails.  We replace it
+  with a RUN instruction that writes metadata.json inline.
 
 Usage:
     python3 data/patchers/patch_r2egym_tasks.py \
@@ -36,6 +41,7 @@ Usage:
 import argparse
 import gzip
 import io
+import json
 import tarfile
 from pathlib import Path
 from typing import Optional
@@ -47,8 +53,6 @@ from datasets import Dataset, Features, Value, load_dataset
 # ---------------------------------------------------------------------------
 
 # The oracle is a no-op: the docker image already has the fixed code.
-# The verifier (test.sh) runs the tests and writes reward to
-# /logs/verifier/reward.txt automatically.
 _SOLVE_SH = """\
 #!/usr/bin/env bash
 # Oracle solution for R2E-Gym tasks.
@@ -78,12 +82,35 @@ def get_reward() -> float:
 """
 
 
+def _build_dockerfile(base_image: str, metadata_json_str: str) -> str:
+    """
+    Build a Daytona-compatible Dockerfile that:
+    1. Inherits from the r2egym base image (which has the fixed code).
+    2. Writes metadata.json inline (no COPY needed — avoids build-context issues).
+    3. Creates /logs directory for the reward file.
+    """
+    # Escape the JSON for embedding in a shell heredoc
+    # Use printf with hex escaping to be safe with special characters
+    escaped = metadata_json_str.replace('\\', '\\\\').replace("'", "'\\''")
+    return (
+        f"FROM {base_image}\n"
+        f"RUN mkdir -p /workspace /logs/verifier\n"
+        f"RUN printf '%s' '{escaped}' > /workspace/metadata.json\n"
+        f"WORKDIR /testbed\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tarball manipulation
 # ---------------------------------------------------------------------------
 
 def repack_task(task_binary: bytes) -> bytes:
-    """Add solution/solve.sh and tests/test_state.py to the task tarball."""
+    """
+    Repack the task tarball with:
+    - solution/solve.sh          (no-op oracle)
+    - tests/test_state.py        (Harbor reward reader)
+    - environment/Dockerfile     (rewritten to inline metadata.json)
+    """
     # Read existing tarball
     with gzip.open(io.BytesIO(task_binary)) as gz_in:
         with tarfile.open(fileobj=gz_in) as tar_in:
@@ -92,25 +119,41 @@ def repack_task(task_binary: bytes) -> bytes:
                 f = tar_in.extractfile(member)
                 members[member.name] = (member, f.read() if f else b'')
 
+    # Extract metadata.json
+    meta_key = 'environment/workspace/metadata.json'
+    if meta_key not in members:
+        raise ValueError(f'Missing {meta_key} in tarball')
+    metadata_json_str = members[meta_key][1].decode('utf-8')
+    metadata = json.loads(metadata_json_str)
+    base_image = metadata.get('docker_image', '')
+    if not base_image:
+        raise ValueError('docker_image not found in metadata.json')
+
+    # Build new Dockerfile
+    new_dockerfile = _build_dockerfile(base_image, metadata_json_str)
+
     # Build new tarball
     out_buf = io.BytesIO()
     with gzip.GzipFile(fileobj=out_buf, mode='wb', mtime=0) as gz_out:
         with tarfile.open(fileobj=gz_out, mode='w') as tar_out:
-            # Write existing files
-            for name, (member, data) in members.items():
-                info = tarfile.TarInfo(name=name)
-                info.size = len(data)
-                info.mode = member.mode
-                info.mtime = 0
-                tar_out.addfile(info, io.BytesIO(data))
 
-            def add_file(name: str, content: str, mode: int = 0o644) -> None:
-                data = content.encode('utf-8')
+            def add_bytes(name: str, data: bytes, mode: int = 0o644) -> None:
                 info = tarfile.TarInfo(name=name)
                 info.size = len(data)
                 info.mode = mode
                 info.mtime = 0
                 tar_out.addfile(info, io.BytesIO(data))
+
+            def add_file(name: str, content: str, mode: int = 0o644) -> None:
+                add_bytes(name, content.encode('utf-8'), mode)
+
+            # Write existing files, replacing the Dockerfile
+            for name, (member, data) in members.items():
+                if name == 'environment/Dockerfile':
+                    # Replace with our rewritten Dockerfile
+                    add_file(name, new_dockerfile)
+                else:
+                    add_bytes(name, data, member.mode)
 
             # Add solution/
             add_file('solution/solve.sh', _SOLVE_SH, mode=0o755)
