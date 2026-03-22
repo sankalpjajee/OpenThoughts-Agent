@@ -160,8 +160,8 @@ def _validate_task_worker(args: Tuple[Path, int, int, int, int, int]) -> Tuple[s
             ok = asyncio.run(_try_build_once(dockerfile, cpu=cpu, memory_gb=memory_gb, disk_gb=disk_gb, gpu=gpu, timeout=timeout))
             if ok:
                 return name, True
-        except (DaytonaError, Exception):  # broad catch: any failure triggers retry
-            pass
+        except (DaytonaError, Exception) as _worker_exc:  # broad catch: any failure triggers retry
+            print(f"[daytona-worker] {name} attempt {i+1} failed: {type(_worker_exc).__name__}: {_worker_exc}", flush=True)
         if i < len(backoffs) - 1:
             time.sleep(delay)
     return name, False
