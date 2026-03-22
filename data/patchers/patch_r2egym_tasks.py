@@ -153,9 +153,14 @@ def main() -> None:
     parser.add_argument(
         '--hf-token',
         default=None,
-        help='HuggingFace token for upload',
+        help='HuggingFace token for upload (falls back to HF_TOKEN env var)',
     )
     args = parser.parse_args()
+
+    # Fall back to env var if flag not provided
+    import os
+    if args.hf_token is None:
+        args.hf_token = os.environ.get('HF_TOKEN')
 
     print(f'Loading sandbox dataset: {args.sandbox_repo}')
     ds = load_dataset(args.sandbox_repo, split='train')
