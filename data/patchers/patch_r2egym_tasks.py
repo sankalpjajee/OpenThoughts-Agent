@@ -3,31 +3,27 @@
 Patch DCAgent2/r2egym_sandboxes with Harbor-compatible solution/solve.sh and
 tests/test_state.py files.
 
-Each task in the r2egym_sandboxes dataset already has:
+Each task in the r2egym_sandboxes dataset has:
   - instruction.md       (the issue / problem statement)
   - task.toml
   - environment/Dockerfile
-  - environment/workspace/metadata.json   (contains expected_output_json)
+  - environment/workspace/metadata.json   (contains expected_output_json,
+                                           base_commit = the FIXED commit hash)
   - tests/test.sh        (verifier: runs /root/run_tests.sh, calculates reward,
                           writes to /logs/verifier/reward.txt)
 
+The docker images are built from the FIXED commit but with a REVERSE patch
+applied (SWE-bench style), so the code in the container is BROKEN.
+
+The oracle solve.sh must apply the forward patch (broken → fixed) before the
+verifier runs.  The ground-truth patch is reconstructed from R2E-Gym-Lite
+(R2E-Gym/R2E-Gym-Lite) which contains old_file_content and new_file_content
+for each changed file.
+
 This patcher adds / modifies:
-  - solution/solve.sh         (oracle: no-op, docker image has the FIXED code)
+  - solution/solve.sh         (oracle: applies the forward patch)
   - tests/test_state.py       (Harbor reward reader)
-  - environment/Dockerfile    (COPY workspace replaced with inline RUN)
-
-Why no-op oracle?
-  The docker images are named `namanjain12/<repo>_final:<commit_hash>` where
-  <commit_hash> is the FIXED commit.  The image therefore starts with the
-  correct code already applied.  The existing test.sh runs the unit tests and
-  writes 1.0 to /logs/verifier/reward.txt when they all pass — so the oracle
-  just needs to let the verifier run without modifying anything.
-
-Why rewrite the Dockerfile?
-  The original Dockerfile contains `COPY workspace /workspace` which requires
-  a build context directory.  Daytona's Image.from_dockerfile() sends only the
-  Dockerfile content, not surrounding files, so the COPY fails.  We replace it
-  with a RUN instruction that writes metadata.json inline.
+  - environment/Dockerfile    (COPY workspace replaced with inline RUN via base64)
 
 Usage:
     python3 data/patchers/patch_r2egym_tasks.py \
@@ -39,6 +35,8 @@ Usage:
 """
 
 import argparse
+import base64
+import difflib
 import gzip
 import io
 import json
@@ -51,20 +49,6 @@ from datasets import Dataset, Features, Value, load_dataset
 # ---------------------------------------------------------------------------
 # Templates
 # ---------------------------------------------------------------------------
-
-# The oracle is a no-op: the docker image already has the fixed code.
-_SOLVE_SH = """\
-#!/usr/bin/env bash
-# Oracle solution for R2E-Gym tasks.
-#
-# The docker image is built from the FIXED commit, so the repository at
-# /testbed already contains the correct code.  The verifier (test.sh) will
-# run the unit tests and write the reward to /logs/verifier/reward.txt.
-#
-# Nothing needs to be done here.
-echo "[oracle] R2E-Gym oracle: docker image already has the fixed code."
-echo "[oracle] The verifier will run the tests and compute the reward."
-"""
 
 # Harbor reads the reward via this Python module.
 _TEST_STATE_PY = """\
@@ -82,16 +66,44 @@ def get_reward() -> float:
 """
 
 
+def _build_solve_sh(patch_b64: str) -> str:
+    """
+    Build the oracle solve.sh that:
+    1. Decodes the base64 patch
+    2. Applies it with `git apply` at /testbed
+    """
+    return f"""\
+#!/usr/bin/env bash
+# Oracle solution for R2E-Gym tasks.
+#
+# The docker image starts with the BROKEN code (reverse-patched from the fixed
+# commit).  This script applies the forward patch to restore the fixed code,
+# then the verifier (test.sh) runs the unit tests and writes the reward.
+
+set -e
+
+PATCH_B64="{patch_b64}"
+
+echo "[oracle] Decoding and applying forward patch..."
+echo "$PATCH_B64" | base64 -d > /tmp/oracle_fix.patch
+
+cd /testbed
+git apply /tmp/oracle_fix.patch && echo "[oracle] Patch applied successfully." || {{
+    echo "[oracle] git apply failed, trying patch -p1..."
+    patch -p1 < /tmp/oracle_fix.patch
+}}
+
+echo "[oracle] Done. Verifier will now run the tests."
+"""
+
+
 def _build_dockerfile(base_image: str, metadata_json_str: str) -> str:
     """
     Build a Daytona-compatible Dockerfile that:
-    1. Inherits from the r2egym base image (which has the fixed code).
+    1. Inherits from the r2egym base image (which has the broken code).
     2. Writes metadata.json inline via base64 (single-line, no Dockerfile parse issues).
     3. Creates /logs directory for the reward file.
     """
-    import base64
-    # Encode as base64 so the JSON never contains newlines or special chars
-    # that would confuse the Dockerfile parser.
     b64 = base64.b64encode(metadata_json_str.encode('utf-8')).decode('ascii')
     return (
         f"FROM {base_image}\n"
@@ -102,15 +114,80 @@ def _build_dockerfile(base_image: str, metadata_json_str: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Patch generation from R2E-Gym-Lite
+# ---------------------------------------------------------------------------
+
+def _is_test_file(path: str) -> bool:
+    """Return True if the file is a test file (should be excluded from patch)."""
+    p = path.lower()
+    return (
+        '/test' in p
+        or p.startswith('test')
+        or p.endswith('_test.py')
+        or '/tests/' in p
+    )
+
+
+def _generate_patch_from_file_diffs(file_diffs: list) -> str:
+    """
+    Reconstruct a unified diff from the file_diffs in parsed_commit_content.
+    Only includes non-test source files.
+    """
+    patch_parts = []
+    for fd in file_diffs:
+        path = fd.get('header', {}).get('file', {}).get('path', '')
+        if not path:
+            # Try to infer from minus/plus file
+            minus = fd.get('minus_file', {})
+            if isinstance(minus, dict):
+                path = minus.get('path', '').lstrip('a/')
+        if not path or _is_test_file(path):
+            continue
+        old_content = fd.get('old_file_content', '')
+        new_content = fd.get('new_file_content', '')
+        if old_content == new_content:
+            continue
+        old_lines = old_content.splitlines(keepends=True)
+        new_lines = new_content.splitlines(keepends=True)
+        diff = list(difflib.unified_diff(
+            old_lines, new_lines,
+            fromfile=f'a/{path}',
+            tofile=f'b/{path}',
+        ))
+        if diff:
+            patch_parts.extend(diff)
+    return ''.join(patch_parts)
+
+
+def build_patch_lookup(r2egym_lite_repo: str = 'R2E-Gym/R2E-Gym-Lite') -> dict[str, str]:
+    """
+    Build a dict mapping commit_hash -> unified_patch_str from R2E-Gym-Lite.
+    """
+    print(f'Loading {r2egym_lite_repo} to build patch lookup...')
+    ds = load_dataset(r2egym_lite_repo, split='train')
+    lookup: dict[str, str] = {}
+    for row in ds:
+        commit = row['commit_hash']
+        try:
+            parsed = json.loads(row['parsed_commit_content'])
+            patch = _generate_patch_from_file_diffs(parsed.get('file_diffs', []))
+        except Exception as e:
+            patch = ''
+        lookup[commit] = patch
+    print(f'Patch lookup built: {len(lookup)} entries, {sum(1 for v in lookup.values() if v)} with non-empty patches')
+    return lookup
+
+
+# ---------------------------------------------------------------------------
 # Tarball manipulation
 # ---------------------------------------------------------------------------
 
-def repack_task(task_binary: bytes) -> bytes:
+def repack_task(task_binary: bytes, patch_str: str) -> bytes:
     """
     Repack the task tarball with:
-    - solution/solve.sh          (no-op oracle)
+    - solution/solve.sh          (oracle: applies the forward patch)
     - tests/test_state.py        (Harbor reward reader)
-    - environment/Dockerfile     (rewritten to inline metadata.json)
+    - environment/Dockerfile     (rewritten to inline metadata.json via base64)
     """
     # Read existing tarball
     with gzip.open(io.BytesIO(task_binary)) as gz_in:
@@ -130,8 +207,10 @@ def repack_task(task_binary: bytes) -> bytes:
     if not base_image:
         raise ValueError('docker_image not found in metadata.json')
 
-    # Build new Dockerfile
+    # Build Dockerfile and solve.sh
     new_dockerfile = _build_dockerfile(base_image, metadata_json_str)
+    patch_b64 = base64.b64encode(patch_str.encode('utf-8')).decode('ascii')
+    solve_sh = _build_solve_sh(patch_b64)
 
     # Build new tarball
     out_buf = io.BytesIO()
@@ -151,7 +230,6 @@ def repack_task(task_binary: bytes) -> bytes:
             # Write existing files, replacing the Dockerfile
             for name, (member, data) in members.items():
                 if member.isdir():
-                    # Preserve directory entries with their original type
                     dir_info = tarfile.TarInfo(name=name)
                     dir_info.type = tarfile.DIRTYPE
                     dir_info.mode = member.mode
@@ -159,13 +237,18 @@ def repack_task(task_binary: bytes) -> bytes:
                     dir_info.size = 0
                     tar_out.addfile(dir_info)
                 elif name == 'environment/Dockerfile':
-                    # Replace with our rewritten Dockerfile
                     add_file(name, new_dockerfile)
                 else:
                     add_bytes(name, data, member.mode)
 
-            # Add solution/
-            add_file('solution/solve.sh', _SOLVE_SH, mode=0o755)
+            # Add solution/ directory and solve.sh
+            dir_info = tarfile.TarInfo(name='solution')
+            dir_info.type = tarfile.DIRTYPE
+            dir_info.mode = 0o755
+            dir_info.mtime = 0
+            dir_info.size = 0
+            tar_out.addfile(dir_info)
+            add_file('solution/solve.sh', solve_sh, mode=0o755)
 
             # Add tests/test_state.py (test.sh already exists)
             add_file('tests/test_state.py', _TEST_STATE_PY)
@@ -185,6 +268,11 @@ def main() -> None:
         '--sandbox-repo',
         default='DCAgent2/r2egym_sandboxes',
         help='HuggingFace repo ID for the sandbox dataset',
+    )
+    parser.add_argument(
+        '--r2egym-lite-repo',
+        default='R2E-Gym/R2E-Gym-Lite',
+        help='HuggingFace repo ID for R2E-Gym-Lite (source of ground-truth patches)',
     )
     parser.add_argument(
         '--output-dir',
@@ -209,10 +297,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Fall back to env var if flag not provided
     import os
     if args.hf_token is None:
         args.hf_token = os.environ.get('HF_TOKEN')
+
+    # Build patch lookup from R2E-Gym-Lite
+    patch_lookup = build_patch_lookup(args.r2egym_lite_repo)
 
     print(f'Loading sandbox dataset: {args.sandbox_repo}')
     ds = load_dataset(args.sandbox_repo, split='train')
@@ -220,7 +310,7 @@ def main() -> None:
         ds = ds.select(range(min(args.limit, len(ds))))
     print(f'Total tasks: {len(ds)}')
 
-    stats = {'total': 0, 'patched': 0, 'error': 0}
+    stats = {'total': 0, 'patched': 0, 'no_patch': 0, 'error': 0}
     patched_rows = []
 
     for i, row in enumerate(ds):
@@ -228,8 +318,28 @@ def main() -> None:
         path = row['path']
         task_binary = bytes(row['task_binary'])
 
+        # Get commit hash from metadata
         try:
-            new_binary = repack_task(task_binary)
+            with gzip.open(io.BytesIO(task_binary)) as gz:
+                with tarfile.open(fileobj=gz) as tar:
+                    f = tar.extractfile('environment/workspace/metadata.json')
+                    meta = json.loads(f.read().decode('utf-8'))
+            commit = meta.get('base_commit', '')
+        except Exception as e:
+            stats['error'] += 1
+            print(f'  [{path}] Error reading metadata: {e}')
+            continue
+
+        patch_str = patch_lookup.get(commit, '')
+        if not patch_str:
+            stats['no_patch'] += 1
+            print(f'  [{path}] WARNING: no patch found for commit {commit[:12]}')
+            # Still patch with empty patch (no-op oracle) — may not pass but
+            # keeps the task in the dataset for manual inspection
+            patch_str = '# No patch found\n'
+
+        try:
+            new_binary = repack_task(task_binary, patch_str)
         except Exception as e:
             stats['error'] += 1
             print(f'  [{path}] Error repacking: {e}')
@@ -239,7 +349,7 @@ def main() -> None:
         stats['patched'] += 1
 
         if i % 500 == 0 and i > 0:
-            print(f'  Progress: {i}/{len(ds)} (patched={stats["patched"]})')
+            print(f'  Progress: {i}/{len(ds)} (patched={stats["patched"]}, no_patch={stats["no_patch"]})')
 
     print(f'\nStats: {stats}')
 
