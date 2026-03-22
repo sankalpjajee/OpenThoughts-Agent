@@ -149,7 +149,15 @@ def repack_task(task_binary: bytes) -> bytes:
 
             # Write existing files, replacing the Dockerfile
             for name, (member, data) in members.items():
-                if name == 'environment/Dockerfile':
+                if member.isdir():
+                    # Preserve directory entries with their original type
+                    dir_info = tarfile.TarInfo(name=name)
+                    dir_info.type = tarfile.DIRTYPE
+                    dir_info.mode = member.mode
+                    dir_info.mtime = 0
+                    dir_info.size = 0
+                    tar_out.addfile(dir_info)
+                elif name == 'environment/Dockerfile':
                     # Replace with our rewritten Dockerfile
                     add_file(name, new_dockerfile)
                 else:
