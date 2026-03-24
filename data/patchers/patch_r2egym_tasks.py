@@ -52,7 +52,7 @@ _COMPILED_REPOS = {"pandas", "numpy", "pillow", "aiohttp", "orange3"}
 # Repos that can use python:X.Y-bookworm directly (pure Python, fast install)
 _PURE_PYTHON_REPOS = {"tornado", "scrapy", "pyramid", "datalad", "coveragepy"}
 
-_GHCR_REGISTRY = "ghcr.io/sankalpjajee"
+_GHCR_REGISTRY = "sankalpjajee"  # Docker Hub (more reliable than ghcr.io for Daytona)
 
 _REPO_PYTHON_VERSION: dict[str, str] = {
     "pandas":     "3.11",
@@ -107,7 +107,7 @@ _REPO_INSTALL_CMD: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _build_dockerfile_compiled(repo_name: str) -> str:
-    """Dockerfile for compiled repos: use pre-built ghcr.io image."""
+    """Dockerfile for compiled repos: use pre-built Docker Hub image."""
     return f"""\
 FROM {_GHCR_REGISTRY}/r2egym-{repo_name}:latest
 

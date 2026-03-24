@@ -1,14 +1,12 @@
 #!/bin/bash
-# Build and push custom R2E-Gym base images to ghcr.io/sankalpjajee
+# Build and push custom R2E-Gym base images to Docker Hub (sankalpjajee)
+# Also pushes to ghcr.io/sankalpjajee as a mirror.
 #
 # Prerequisites:
-#   1. Create a GitHub PAT with write:packages scope at:
-#      https://github.com/settings/tokens/new
-#   2. Login to ghcr.io:
+#   1. Login to Docker Hub:
+#      docker login -u sankalpjajee
+#   2. (Optional) Login to ghcr.io for the mirror:
 #      echo "YOUR_GITHUB_PAT" | docker login ghcr.io -u sankalpjajee --password-stdin
-#   3. After pushing, make packages public at:
-#      https://github.com/sankalpjajee?tab=packages
-#      (each package → Package settings → Change visibility → Public)
 #
 # Usage:
 #   bash data/patchers/r2egym_base_images/build_and_push.sh
@@ -19,32 +17,36 @@
 
 set -euo pipefail
 
-REGISTRY="ghcr.io/sankalpjajee"
+DOCKERHUB_REGISTRY="sankalpjajee"
+GHCR_REGISTRY="ghcr.io/sankalpjajee"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 REPOS=(pandas numpy pillow aiohttp orange3)
 
 for repo in "${REPOS[@]}"; do
-    IMAGE="${REGISTRY}/r2egym-${repo}:latest"
+    DH_IMAGE="${DOCKERHUB_REGISTRY}/r2egym-${repo}:latest"
+    GHCR_IMAGE="${GHCR_REGISTRY}/r2egym-${repo}:latest"
+
     echo ""
     echo "=========================================="
-    echo "Building: ${IMAGE}"
+    echo "Building: ${DH_IMAGE}"
     echo "=========================================="
-    docker build -t "${IMAGE}" "${SCRIPT_DIR}/${repo}/"
+    docker build -t "${DH_IMAGE}" "${SCRIPT_DIR}/${repo}/"
+
     echo ""
-    echo "Pushing: ${IMAGE}"
-    docker push "${IMAGE}"
-    echo "Done: ${IMAGE}"
+    echo "Pushing to Docker Hub: ${DH_IMAGE}"
+    docker push "${DH_IMAGE}"
+
+    # Mirror to ghcr.io if logged in
+    if docker info 2>/dev/null | grep -q "ghcr.io"; then
+        echo "Pushing to ghcr.io: ${GHCR_IMAGE}"
+        docker tag "${DH_IMAGE}" "${GHCR_IMAGE}"
+        docker push "${GHCR_IMAGE}" || echo "Warning: ghcr.io push failed, Docker Hub push succeeded"
+    fi
+
+    echo "Done: ${DH_IMAGE}"
 done
 
 echo ""
-echo "All images built and pushed."
-echo ""
-echo "IMPORTANT: Make each package public so Harbor can pull without auth:"
-echo "  https://github.com/sankalpjajee?tab=packages"
-echo "  (each r2egym-* package → Package settings → Change visibility → Public)"
-echo ""
-echo "Or use the GitHub API:"
-for repo in "${REPOS[@]}"; do
-    echo "  gh api --method PATCH /user/packages/container/r2egym-${repo} -f visibility=public"
-done
+echo "All images built and pushed to Docker Hub."
+echo "Pull with: docker pull sankalpjajee/r2egym-<repo>:latest"
