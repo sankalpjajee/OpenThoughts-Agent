@@ -52,7 +52,7 @@ _COMPILED_REPOS = {"pandas", "numpy", "pillow", "aiohttp", "orange3"}
 # Repos that can use python:X.Y-bookworm directly (pure Python, fast install)
 _PURE_PYTHON_REPOS = {"tornado", "scrapy", "pyramid", "datalad", "coveragepy"}
 
-_GHCR_REGISTRY = "ghcr.io/open-thoughts"
+_GHCR_REGISTRY = "ghcr.io/sankalpjajee"
 
 _REPO_PYTHON_VERSION: dict[str, str] = {
     "pandas":     "3.11",

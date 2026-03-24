@@ -1,10 +1,14 @@
 #!/bin/bash
-# Build and push custom R2E-Gym base images to ghcr.io
+# Build and push custom R2E-Gym base images to ghcr.io/sankalpjajee
 #
 # Prerequisites:
-#   - Docker installed and running
-#   - Authenticated to ghcr.io:
-#       echo $GITHUB_TOKEN | docker login ghcr.io -u <username> --password-stdin
+#   1. Create a GitHub PAT with write:packages scope at:
+#      https://github.com/settings/tokens/new
+#   2. Login to ghcr.io:
+#      echo "YOUR_GITHUB_PAT" | docker login ghcr.io -u sankalpjajee --password-stdin
+#   3. After pushing, make packages public at:
+#      https://github.com/sankalpjajee?tab=packages
+#      (each package → Package settings → Change visibility → Public)
 #
 # Usage:
 #   bash data/patchers/r2egym_base_images/build_and_push.sh
@@ -15,7 +19,7 @@
 
 set -euo pipefail
 
-REGISTRY="ghcr.io/open-thoughts"
+REGISTRY="ghcr.io/sankalpjajee"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 REPOS=(pandas numpy pillow aiohttp orange3)
@@ -35,7 +39,12 @@ done
 
 echo ""
 echo "All images built and pushed."
-echo "Images:"
+echo ""
+echo "IMPORTANT: Make each package public so Harbor can pull without auth:"
+echo "  https://github.com/sankalpjajee?tab=packages"
+echo "  (each r2egym-* package → Package settings → Change visibility → Public)"
+echo ""
+echo "Or use the GitHub API:"
 for repo in "${REPOS[@]}"; do
-    echo "  ghcr.io/open-thoughts/r2egym-${repo}:latest"
+    echo "  gh api --method PATCH /user/packages/container/r2egym-${repo} -f visibility=public"
 done
