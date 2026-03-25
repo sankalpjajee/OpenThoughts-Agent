@@ -24,8 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPOS=(pandas numpy pillow aiohttp orange3)
 
 for repo in "${REPOS[@]}"; do
-    DH_IMAGE="${DOCKERHUB_REGISTRY}/r2egym-${repo}:latest"
-    GHCR_IMAGE="${GHCR_REGISTRY}/r2egym-${repo}:latest"
+    DH_IMAGE="${DOCKERHUB_REGISTRY}/r2egym-${repo}:v1"
+    GHCR_IMAGE="${GHCR_REGISTRY}/r2egym-${repo}:v1"
 
     echo ""
     echo "=========================================="
@@ -49,4 +49,4 @@ done
 
 echo ""
 echo "All images built and pushed to Docker Hub."
-echo "Pull with: docker pull sankalpjajee/r2egym-<repo>:latest"
+echo "Pull with: docker pull sankalpjajee/r2egym-<repo>:v1"
