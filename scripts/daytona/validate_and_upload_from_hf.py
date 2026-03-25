@@ -178,7 +178,9 @@ def _ensure_output_dir_in_dockerfile(dockerfile: Path) -> None:
     if any(directive in line for line in content):
         return
 
-    insert_idx = 0
+    # Insert after WORKDIR if present, otherwise append at the end.
+    # NEVER insert before FROM — that causes "no build stage in current context".
+    insert_idx = len(content)  # default: append at end
     for idx, line in enumerate(content):
         if line.strip().upper().startswith("WORKDIR"):
             insert_idx = idx + 1
