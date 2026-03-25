@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-Patch R2E-Gym tasks: use original per-task images as base.
-
-Uses the original namanjain12 Docker image from each task as the base image.
-This guarantees Daytona can pull the image (it already exists on Docker Hub).
-We layer our test files, reward calculation, and oracle on top.
+Patch R2E-Gym tasks: 4,578 unique docker images → 10 (one per repo).
 
 Merges two HuggingFace datasets:
   - DCAgent2/r2egym_sandboxes    → task tarballs (instruction.md, Dockerfile, metadata, test.sh)
@@ -12,15 +8,21 @@ Merges two HuggingFace datasets:
 
 For each task:
   1. Matches sandbox tarball to R2E-Gym-Lite row by commit hash
-  2. Extracts the original FROM image from the existing Dockerfile
-  3. Builds a new Dockerfile using that original image as base
-  4. Injects test files (test_0.py, conftest.py, etc.) from R2E-Gym-Lite
-  5. Adds solution/solve.sh (oracle: git checkout base_commit)
-  6. Adds tests/test_state.py (Harbor reward reader)
-  7. Rewrites tests/test.sh to run injected test files + calculate reward
+  2. Injects test files (test_0.py, conftest.py, etc.) from R2E-Gym-Lite
+  3. Replaces Dockerfile with one of 10 shared per-repo images
+  4. Adds solution/solve.sh (oracle: git checkout base_commit)
+  5. Adds tests/test_state.py (Harbor reward reader)
+  6. Rewrites tests/test.sh to run injected test files + calculate reward
+
+Compiled repos (pandas, numpy, pillow, aiohttp, orange3) use custom pre-built
+ghcr.io/open-thoughts/r2egym-<repo>:latest images to avoid C extension build
+timeouts. Pure-Python repos use python:X.Y-bookworm directly.
 
 Usage (on cluster):
-    # Test with 10 tasks first:
+    # First build and push the 5 compiled-repo images:
+    bash data/patchers/r2egym_base_images/build_and_push.sh
+
+    # Then run the patcher (test with 10 tasks first):
     python data/patchers/patch_r2egym_tasks.py \\
         --output-dir /mnt/sda4T/home/jajee/r2egym_patched \\
         --limit 10
@@ -35,54 +37,132 @@ from __future__ import annotations
 import io
 import json
 import os
-import re
 import sys
 import tarfile
 import argparse
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Per-repo configuration (used for repo name normalization only)
+# Per-repo configuration
 # ---------------------------------------------------------------------------
 
-ALL_REPOS = {
-    "pandas", "numpy", "pillow", "aiohttp", "orange3",
-    "tornado", "scrapy", "pyramid", "datalad", "coveragepy",
+# Repos that need custom pre-built ghcr.io images (compiled C extensions)
+_COMPILED_REPOS = {"pandas", "numpy", "pillow", "aiohttp", "orange3"}
+
+# Repos that can use python:X.Y-bookworm directly (pure Python, fast install)
+_PURE_PYTHON_REPOS = {"tornado", "scrapy", "pyramid", "datalad", "coveragepy"}
+
+_GHCR_REGISTRY = "docker.io/sankalpjajee"  # Full Docker Hub path for Daytona pull reliability
+
+_REPO_PYTHON_VERSION: dict[str, str] = {
+    "pandas":     "3.11",
+    "numpy":      "3.11",
+    "pillow":     "3.11",
+    "orange3":    "3.10",
+    "aiohttp":    "3.11",
+    "tornado":    "3.11",
+    "scrapy":     "3.11",
+    "pyramid":    "3.11",
+    "datalad":    "3.11",
+    "coveragepy": "3.11",
+}
+
+_REPO_GITHUB_URL: dict[str, str] = {
+    "pandas":     "https://github.com/pandas-dev/pandas.git",
+    "numpy":      "https://github.com/numpy/numpy.git",
+    "pillow":     "https://github.com/python-pillow/Pillow.git",
+    "orange3":    "https://github.com/biolab/orange3.git",
+    "aiohttp":    "https://github.com/aio-libs/aiohttp.git",
+    "tornado":    "https://github.com/tornadoweb/tornado.git",
+    "scrapy":     "https://github.com/scrapy/scrapy.git",
+    "pyramid":    "https://github.com/Pylons/pyramid.git",
+    "datalad":    "https://github.com/datalad/datalad.git",
+    "coveragepy": "https://github.com/nedbat/coveragepy.git",
+}
+
+_REPO_EXTRA_APT: dict[str, str] = {
+    "pandas":     "gfortran libopenblas-dev liblapack-dev pkg-config",
+    "numpy":      "gfortran libopenblas-dev liblapack-dev pkg-config",
+    "pillow":     "libjpeg-dev zlib1g-dev libpng-dev libtiff-dev libwebp-dev libfreetype6-dev liblcms2-dev libopenjp2-7-dev",
+    "orange3":    "libxml2-dev libxslt1-dev libgl1-mesa-glx libglib2.0-0 xvfb libxkbcommon-x11-0 libdbus-1-3 libegl1 libxcb-xinerama0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-cursor0",
+    "aiohttp":    "",
+    "tornado":    "",
+    "scrapy":     "libxml2-dev libxslt1-dev",
+    "pyramid":    "",
+    "datalad":    "git-annex",
+    "coveragepy": "",
+}
+
+_REPO_INSTALL_CMD: dict[str, str] = {
+    "tornado":    "pip install -e . 2>/dev/null || pip install tornado; pip install pytest",
+    "scrapy":     "pip install -e '.[tests]' 2>/dev/null || pip install -e . 2>/dev/null || pip install Scrapy pytest",
+    "pyramid":    "pip install -e '.[testing]' 2>/dev/null || pip install -e . 2>/dev/null || pip install pyramid pytest",
+    "datalad":    "pip install -e '.[devel]' 2>/dev/null || pip install -e . 2>/dev/null || pip install datalad pytest",
+    "coveragepy": "pip install -e '.[dev]' 2>/dev/null || pip install -e . 2>/dev/null || pip install coverage pytest; pip install unittest-mixins mock 2>/dev/null || true",
 }
 
 
 # ---------------------------------------------------------------------------
-# Dockerfile builder — uses original per-task image as base
+# Dockerfile builders
 # ---------------------------------------------------------------------------
 
-def _extract_from_image(dockerfile_content: str) -> str | None:
-    """Extract the FROM image from an existing Dockerfile."""
-    for line in dockerfile_content.splitlines():
-        line = line.strip()
-        if line.upper().startswith("FROM "):
-            # "FROM image:tag" or "FROM image:tag AS ..."
-            parts = line.split()
-            if len(parts) >= 2:
-                return parts[1]
-    return None
-
-
-def _build_dockerfile_from_original(original_image: str) -> str:
-    """Build a minimal Dockerfile using the original task image as base.
-
-    The original namanjain12 images already have the repo cloned at /testbed
-    with all dependencies installed. We just add our test infrastructure dirs.
-    """
+def _build_dockerfile_compiled(repo_name: str) -> str:
+    """Dockerfile for compiled repos: use pre-built Docker Hub image."""
     return f"""\
-FROM {original_image}
+FROM {_GHCR_REGISTRY}/r2egym-{repo_name}:v1
 
-# Original image already has:
-#   - repo cloned at /testbed at the specific commit
-#   - all deps installed
-# We just add directories for Harbor test infrastructure.
+# Pre-built image already has:
+#   - repo cloned at /testbed (HEAD)
+#   - all deps + C extensions compiled
+#   - pytest installed
+# Agent only needs: cd /testbed && git checkout <commit>
 
+COPY workspace /workspace
+RUN mkdir -p /logs /r2e_tests /setup_files
+WORKDIR /testbed
+"""
+
+
+def _build_dockerfile_pure(repo_name: str) -> str:
+    """Dockerfile for pure-Python repos: build from python:X.Y-bookworm."""
+    python_version = _REPO_PYTHON_VERSION.get(repo_name, "3.11")
+    github_url = _REPO_GITHUB_URL[repo_name]
+    install_cmd = _REPO_INSTALL_CMD[repo_name]
+    extra_apt = _REPO_EXTRA_APT.get(repo_name, "").strip()
+    apt_extra_line = f"    {extra_apt} \\\n" if extra_apt else ""
+
+    return f"""\
+FROM python:{python_version}-bookworm
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
+
+RUN apt-get update && apt-get install -y \\
+    git curl wget jq \\
+    build-essential \\
+    libffi-dev libssl-dev \\
+    locales locales-all tzdata \\
+    tmux \\
+{apt_extra_line}\
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip
+
+ENV PYTHONPATH=/testbed
+
+RUN git clone {github_url} /testbed
+WORKDIR /testbed
+RUN {install_cmd}
+
+COPY workspace /workspace
 RUN mkdir -p /logs /r2e_tests /setup_files
 """
+
+
+def _build_dockerfile(repo_name: str) -> str:
+    if repo_name in _COMPILED_REPOS:
+        return _build_dockerfile_compiled(repo_name)
+    return _build_dockerfile_pure(repo_name)
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +357,8 @@ _REPO_ALIASES = {
     "coverage.py": "coveragepy",
 }
 
+ALL_REPOS = set(_REPO_GITHUB_URL.keys())
+
 
 def _repo_name_from_string(raw: str) -> str | None:
     """Normalize a repo name string to one of our 10 canonical names."""
@@ -300,11 +382,10 @@ def repack_task(
     task_binary: bytes,
     test_file_names: list[str],
     test_file_codes: list[str],
-    original_image: str | None = None,
 ) -> bytes:
     """
     Repack a task tarball with:
-      - environment/Dockerfile  → uses original task image as base
+      - environment/Dockerfile  → shared per-repo Dockerfile (10 unique total)
       - tests/test.sh           → new test runner with reward calculation
       - tests/test_state.py     → Harbor reward reader
       - tests/test_N.py         → injected test files from R2E-Gym-Lite
@@ -344,18 +425,11 @@ def repack_task(
     if not base_commit:
         raise ValueError("No base_commit in metadata")
 
-    # Extract original FROM image if not provided
-    if original_image is None:
-        orig_dockerfile = existing.get("environment/Dockerfile", b"").decode(errors="replace")
-        original_image = _extract_from_image(orig_dockerfile)
-    if not original_image:
-        raise ValueError("No FROM image found in original Dockerfile")
-
     # Build replacement/new files
     replacements: dict[str, bytes] = {}
 
-    # 1. Dockerfile — use original task image as base
-    replacements["environment/Dockerfile"] = _build_dockerfile_from_original(original_image).encode()
+    # 1. Dockerfile
+    replacements["environment/Dockerfile"] = _build_dockerfile(repo_name).encode()
 
     # 2. test.sh
     replacements["tests/test.sh"] = _TEST_SH.encode()
@@ -370,12 +444,16 @@ def repack_task(
             fname = f"tests/{fname}"
         replacements[fname] = code.encode()
 
-    # 5. setup_files/metadata.json (for reward calculation inside container)
+    # 5. metadata.json (for reward calculation inside container)
+    #    - environment/workspace/metadata.json → COPY'd to /workspace/ in Dockerfile
+    #    - setup_files/metadata.json → for backward compat
+    #    - tests/metadata.json → fallback via Harbor's /tests/ mount
     meta_bytes = existing.get(
         "environment/workspace/metadata.json",
         existing.get("setup_files/metadata.json", b"{}"),
     )
     replacements["setup_files/metadata.json"] = meta_bytes
+    replacements["tests/metadata.json"] = meta_bytes
 
     # 6. solution/solve.sh
     replacements["solution/solve.sh"] = _SOLVE_SH_TEMPLATE.format(
@@ -427,7 +505,7 @@ def repack_task(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Patch R2E-Gym tasks: use original images as base, inject test infrastructure",
+        description="Patch R2E-Gym tasks: 4,578 unique images → 10 (one per repo)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -538,26 +616,15 @@ def main() -> None:
             stats["error"] += 1
             continue
 
-        # Extract commit hash from metadata and original FROM image
+        # Extract commit hash from metadata
         try:
             with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
                 m = tf.getmember("environment/workspace/metadata.json")
                 meta = json.loads(tf.extractfile(m).read())
-                # Extract original FROM image from the task's Dockerfile
-                orig_dockerfile = tf.extractfile(
-                    tf.getmember("environment/Dockerfile")
-                ).read().decode(errors="replace")
-                original_image = _extract_from_image(orig_dockerfile)
         except Exception as e:
             stats["error"] += 1
             if stats["error"] <= 5:
                 print(f"  ERROR [{path}]: {e}")
-            continue
-
-        if not original_image:
-            stats["error"] += 1
-            if stats["error"] <= 5:
-                print(f"  ERROR [{path}]: no FROM image in original Dockerfile")
             continue
 
         base_commit = meta.get("base_commit", "")
@@ -594,7 +661,7 @@ def main() -> None:
             continue
 
         try:
-            new_binary = repack_task(task_binary, test_names, test_codes, original_image=original_image)
+            new_binary = repack_task(task_binary, test_names, test_codes)
         except Exception as e:
             stats["error"] += 1
             repo_stats[repo]["error"] += 1
@@ -649,7 +716,7 @@ def main() -> None:
                 unique_dfs.add(tf.extractfile(m).read().decode())
         except Exception:
             pass
-    print(f"\nUnique Dockerfiles: {len(unique_dfs)} (using original per-task images)")
+    print(f"\nUnique Dockerfiles: {len(unique_dfs)} (target: {len(ALL_REPOS)})")
 
     # ------------------------------------------------------------------
     # Step 5: Save
