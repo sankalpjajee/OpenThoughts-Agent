@@ -3,7 +3,7 @@
 Quick validation of patched R2E-Gym dataset.
 
 Checks that each task tarball has the expected structure after patching:
-  - environment/Dockerfile (one of 10 shared images)
+  - environment/Dockerfile (using original per-task image as base)
   - tests/test.sh (reward-calculating test runner)
   - tests/test_state.py (Harbor reward reader)
   - tests/test_*.py (at least one test file from R2E-Gym-Lite)
@@ -59,12 +59,14 @@ def validate_tarball(task_binary: bytes, path: str) -> dict:
     if not test_files:
         issues.append("No test_*.py files found in tests/")
 
-    # Check Dockerfile content
+    # Check Dockerfile content — should have a FROM line and our infrastructure dirs
     if "environment/Dockerfile" in files_found:
         with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
             df = tf.extractfile(tf.getmember("environment/Dockerfile")).read().decode()
-            if "namanjain12" in df:
-                issues.append("Dockerfile still uses original per-commit image")
+            if "FROM " not in df:
+                issues.append("Dockerfile missing FROM line")
+            if "/logs" not in df:
+                issues.append("Dockerfile missing /logs directory setup")
 
     # Check metadata has expected_output_json
     if "setup_files/metadata.json" in files_found:
