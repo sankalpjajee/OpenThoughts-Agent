@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Patch R2E-Gym tasks: 4,578 unique docker images → 10 (one per repo).
+Patch R2E-Gym tasks: inject test files + reward infrastructure into original tarballs.
 
 Merges two HuggingFace datasets:
   - DCAgent2/r2egym_sandboxes    → task tarballs (instruction.md, Dockerfile, metadata, test.sh)
@@ -9,23 +9,19 @@ Merges two HuggingFace datasets:
 For each task:
   1. Matches sandbox tarball to R2E-Gym-Lite row by commit hash
   2. Injects test files (test_0.py, conftest.py, etc.) from R2E-Gym-Lite
-  3. Replaces Dockerfile with one of 10 shared per-repo images
+  3. Keeps the original namanjain12 Dockerfile (pre-cached on Daytona), adds mkdir
   4. Adds solution/solve.sh (oracle: git checkout base_commit)
   5. Adds tests/test_state.py (Harbor reward reader)
   6. Rewrites tests/test.sh to run injected test files + calculate reward
 
-Compiled repos (pandas, numpy, pillow, aiohttp, orange3) use custom pre-built
-ghcr.io/open-thoughts/r2egym-<repo>:latest images to avoid C extension build
-timeouts. Pure-Python repos use python:X.Y-bookworm directly.
+The original namanjain12/<repo>_final:<commit> images are pre-cached on Daytona
+and start in seconds. Custom images cause build timeouts (6+ GB pull).
 
 Usage (on cluster):
-    # First build and push the 5 compiled-repo images:
-    bash data/patchers/r2egym_base_images/build_and_push.sh
-
-    # Then run the patcher (test with 10 tasks first):
+    # Run the patcher (test with 30 tasks first):
     python data/patchers/patch_r2egym_tasks.py \\
         --output-dir /mnt/sda4T/home/jajee/r2egym_patched \\
-        --limit 10
+        --limit 30
 
     # Full run + upload:
     python data/patchers/patch_r2egym_tasks.py \\
@@ -425,8 +421,12 @@ def repack_task(
     # Build replacement/new files
     replacements: dict[str, bytes] = {}
 
-    # 1. Dockerfile
-    replacements["environment/Dockerfile"] = _build_dockerfile(repo_name).encode()
+    # 1. Dockerfile — keep the original namanjain12 image (pre-cached on Daytona),
+    #    just append the mkdir line so /logs, /r2e_tests, /setup_files exist.
+    orig_dockerfile = existing.get("environment/Dockerfile", b"")
+    if b"/logs" not in orig_dockerfile:
+        orig_dockerfile = orig_dockerfile.rstrip() + b"\nRUN mkdir -p /logs /r2e_tests /setup_files\n"
+    replacements["environment/Dockerfile"] = orig_dockerfile
 
     # 2. test.sh
     replacements["tests/test.sh"] = _TEST_SH.encode()
