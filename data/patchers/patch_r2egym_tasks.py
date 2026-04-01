@@ -134,12 +134,22 @@ else
 fi
 cd /testbed && $PIP install -e . -q 2>/dev/null || true
 
+# 0b. Rebuild Cython extensions in-place to match the checked-out commit.
+#     Skips if setup.py doesn't exist or build fails (non-Cython repos).
+if [ -f /testbed/setup.py ]; then
+    cd /testbed && python setup.py build_ext --inplace -q 2>/dev/null || true
+fi
+
 # 1. Run tests — use -v so each result line is "PASSED" or "FAILED",
 #    exclude test_state.py (it is a reward reader, not a test).
+#    Exclude GUI widget tests (OW* prefix) that require a Qt display and crash
+#    pytest with SIGABRT in headless containers.
 #    Write output to a log file for parsing.
 pytest /tests/test_*.py \\
     --ignore=/tests/test_state.py \\
+    --ignore-glob=/tests/test_OW*.py \\
     -v --tb=short \\
+    -p no:qt \\
     2>&1 | tee /logs/pytest_output.txt || true
 
 # 2. Calculate reward
@@ -471,6 +481,19 @@ def main() -> None:
 
             if not test_file_names or not test_file_codes:
                 print(f"[{i}] Skip: no test files in execution_result_content for {commit[:8]}")
+                skipped += 1
+                continue
+
+            # Skip GUI widget tasks: Orange3 OW* tests require a Qt display and
+            # crash pytest with SIGABRT in headless containers. Filter them out
+            # if ALL test file names are OW* (pure GUI task).
+            gui_only = all(
+                any(part.startswith(("OW", "ow", "test_OW", "test_ow"))
+                    for part in fname.replace("\\", "/").split("/"))
+                for fname in test_file_names
+            )
+            if gui_only:
+                print(f"[{i}] Skip: GUI-only task (OW* tests) for {commit[:8]}")
                 skipped += 1
                 continue
 
