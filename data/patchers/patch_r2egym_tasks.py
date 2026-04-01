@@ -60,10 +60,32 @@ _SHARED_BASE_IMAGES = {
 # Dockerfile builder
 # ---------------------------------------------------------------------------
 
+# Per-repo extra dependencies that may be missing from the base image.
+# These are installed at container build time so tests can import them.
+_EXTRA_DEPS: dict[str, list[str]] = {
+    'orange3':    ['xlsxwriter', 'anyqt', 'serverfiles'],
+    'aiohttp':    [],
+    'coveragepy': [],
+    'datalad':    [],
+    'numpy':      [],
+    'pandas':     [],
+    'pillow':     [],
+    'pyramid':    [],
+    'scrapy':     [],
+    'tornado':    [],
+}
+
+
 def _build_dockerfile(repo_name: str) -> str:
     base_image = _SHARED_BASE_IMAGES.get(repo_name)
     if not base_image:
         raise ValueError(f"No shared base image for repo: {repo_name}")
+
+    extra_deps = _EXTRA_DEPS.get(repo_name, [])
+    extra_lines = ""
+    if extra_deps:
+        pkgs = ' '.join(extra_deps)
+        extra_lines = f"\n# Install extra deps missing from base image\nRUN pip install {pkgs} -q 2>/dev/null || true\n"
 
     return f"""\
 FROM {base_image}
@@ -71,7 +93,7 @@ FROM {base_image}
 # Shared per-repo base image.
 # Agent MUST perform: cd /testbed && git checkout <commit>
 # to get to the correct task state.
-
+{extra_lines}
 RUN mkdir -p /logs /r2e_tests /setup_files
 """
 
@@ -91,13 +113,26 @@ RUN mkdir -p /logs /r2e_tests /setup_files
 _TEST_SH = """\
 #!/bin/bash
 # R2E-Gym test runner with reward calculation.
-# 1. Run pytest on injected test files (Python 3.7-compatible, no extra plugins).
-# 2. Compare results to expected_output_json from metadata.
-# 3. Write reward (0.0 or 1.0) to /logs/verifier/reward.txt.
+# 1. Ensure repo deps are installed (handles missing packages like xlsxwriter).
+# 2. Run pytest on injected test files (Python 3.7-compatible, no extra plugins).
+# 3. Compare results to expected_output_json from metadata.
+# 4. Write reward (0.0 or 1.0) to /logs/verifier/reward.txt.
 
 set -x
 
 mkdir -p /logs/verifier
+
+# 0. Reinstall the repo in editable mode to pick up any missing deps.
+#    The agent may have checked out a different commit with new requirements.
+#    Use the venv if present, otherwise fall back to system pip.
+if [ -f /testbed/.venv/bin/pip ]; then
+    PIP=/testbed/.venv/bin/pip
+elif [ -f /testbed/.venv/bin/pip3 ]; then
+    PIP=/testbed/.venv/bin/pip3
+else
+    PIP=pip
+fi
+cd /testbed && $PIP install -e . -q 2>/dev/null || true
 
 # 1. Run tests — use -v so each result line is "PASSED" or "FAILED",
 #    exclude test_state.py (it is a reward reader, not a test).
