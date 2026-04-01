@@ -13,10 +13,10 @@ Checks that each task tarball has the expected structure after patching:
 
 Usage:
     # Validate from saved disk dataset
-    python validate_r2egym_patch.py /mnt/sda4T/home/jajee/r2egym_patched
+    python data/patchers/validate_r2egym_patch.py /mnt/sda4T/home/jajee/r2egym_patched
 
     # Validate from HuggingFace
-    python validate_r2egym_patch.py --hf-repo SankalpKJ/r2egym-patched-v8-full --limit 20
+    python data/patchers/validate_r2egym_patch.py --hf-repo SankalpKJ/r2egym-patched-v8-full --limit 20
 """
 from __future__ import annotations
 
@@ -27,9 +27,21 @@ import os
 import sys
 import tarfile
 
-from patch_r2egym_tasks import _SHARED_BASE_IMAGES
-
-_SHARED_BASE_IMAGE_SET = set(_SHARED_BASE_IMAGES.values())
+# ---------------------------------------------------------------------------
+# The 10 known shared base images — self-contained, no import needed
+# ---------------------------------------------------------------------------
+_SHARED_BASE_IMAGE_SET = {
+    'namanjain12/aiohttp_final:f0d74880deec8fcd982bce639c93c5e130d41198',
+    'namanjain12/coveragepy_final:c1bfa7352368b63f3a9b30c02f242408d07a7ab2',
+    'namanjain12/datalad_final:f5e1d276ab51aefcf5e48e6f7bd9833b19ef7f90',
+    'namanjain12/numpy_final:14445500bdf67600f926c6426bad55977441dca0',
+    'namanjain12/orange3_final:2d9617bd0cb1f0ba61771258410ab8fae8e7e24d',
+    'namanjain12/pandas_final:fadb72cf5ef8489e409d4d33625bd16a76fa7a42',
+    'namanjain12/pillow_final:f644adbb05d615a9902ef3643714d5fe8049cea3',
+    'namanjain12/pyramid_final:fbbb20c7953370c86f999e865b1a9d682690eb70',
+    'namanjain12/scrapy_final:fbb411a805724fec50b786f369be79dc221c798e',
+    'namanjain12/tornado_final:b5ec807edc83c8e7d1d12553d635ebe765e5c614',
+}
 
 
 def validate_tarball(task_binary: bytes, path: str) -> dict:
@@ -39,7 +51,7 @@ def validate_tarball(task_binary: bytes, path: str) -> dict:
     dockerfile_content = None
     metadata_content = None
 
-    # BUG 3 FIX: read all needed content in a single tarball open
+    # Read all needed content in a single tarball open
     try:
         with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
             for m in tf.getmembers():
@@ -78,17 +90,16 @@ def validate_tarball(task_binary: bytes, path: str) -> dict:
     if not test_files:
         issues.append("No test_*.py files found in tests/")
 
-    # BUG 2 FIX: check that Dockerfile FROM line is one of the 10 known shared
-    # base images (all under namanjain12/).  The old check was inverted — it
-    # flagged every correctly-patched task because the shared images ARE hosted
-    # under namanjain12/.
+    # Check Dockerfile FROM line is one of the 10 known shared base images.
+    # NOTE: all shared images ARE under namanjain12/ so checking for that string
+    # alone is wrong — we must check the exact image ref.
     if dockerfile_content is not None:
         from_line = next(
             (line.strip() for line in dockerfile_content.splitlines()
              if line.strip().upper().startswith("FROM")),
             "",
         )
-        image_ref = from_line[len("FROM"):].strip()
+        image_ref = from_line[4:].strip()  # strip "FROM "
         if image_ref not in _SHARED_BASE_IMAGE_SET:
             issues.append(
                 f"Dockerfile FROM is not a known shared base image: {image_ref!r}"
@@ -101,7 +112,6 @@ def validate_tarball(task_binary: bytes, path: str) -> dict:
             if "expected_output_json" not in meta:
                 issues.append("metadata.json missing expected_output_json")
             else:
-                # Verify it is parseable (it is stored as a JSON string)
                 exp_raw = meta["expected_output_json"]
                 if isinstance(exp_raw, str):
                     try:
@@ -149,7 +159,7 @@ def main():
 
     total = 0
     valid = 0
-    unique_dfs = set()
+    unique_dfs: set[str] = set()
     repo_counts: dict[str, int] = {}
     all_issues = []
 
@@ -169,13 +179,18 @@ def main():
             if args.verbose and len(all_issues) <= 20:
                 print(f"  ISSUES [{path}]: {result['issues']}")
 
-        # Track unique Dockerfiles and repos (single open, already done in validate_tarball)
+        # Track unique Dockerfiles and repos
         try:
             with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
                 members = {m.name: m for m in tf.getmembers() if m.isfile()}
                 if "environment/Dockerfile" in members:
                     df = tf.extractfile(members["environment/Dockerfile"]).read().decode()
-                    unique_dfs.add(df[:120])
+                    # Use the FROM line as the unique key
+                    from_line = next(
+                        (l.strip() for l in df.splitlines() if l.strip().upper().startswith("FROM")),
+                        df[:120],
+                    )
+                    unique_dfs.add(from_line)
                 if "setup_files/metadata.json" in members:
                     meta = json.loads(tf.extractfile(members["setup_files/metadata.json"]).read())
                     repo = meta.get("repo_name", "unknown")
