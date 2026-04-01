@@ -3,7 +3,7 @@
 Quick validation of patched R2E-Gym dataset.
 
 Checks that each task tarball has the expected structure after patching:
-  - environment/Dockerfile (one of 10 shared images)
+  - environment/Dockerfile (one of 10 shared namanjain12 images)
   - tests/test.sh (reward-calculating test runner)
   - tests/test_state.py (Harbor reward reader)
   - tests/test_*.py (at least one test file from R2E-Gym-Lite)
@@ -16,7 +16,7 @@ Usage:
     python validate_r2egym_patch.py /mnt/sda4T/home/jajee/r2egym_patched
 
     # Validate from HuggingFace
-    python validate_r2egym_patch.py --hf-repo SankalpKJ/r2egym-patched --limit 20
+    python validate_r2egym_patch.py --hf-repo SankalpKJ/r2egym-patched-v8-full --limit 20
 """
 from __future__ import annotations
 
@@ -27,17 +27,33 @@ import os
 import sys
 import tarfile
 
+from patch_r2egym_tasks import _SHARED_BASE_IMAGES
+
+_SHARED_BASE_IMAGE_SET = set(_SHARED_BASE_IMAGES.values())
+
 
 def validate_tarball(task_binary: bytes, path: str) -> dict:
-    """Validate a single task tarball. Returns dict of issues."""
+    """Validate a single task tarball. Returns dict with issues list."""
     issues = []
     files_found = set()
+    dockerfile_content = None
+    metadata_content = None
 
+    # BUG 3 FIX: read all needed content in a single tarball open
     try:
         with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
             for m in tf.getmembers():
-                if m.isfile():
-                    files_found.add(m.name)
+                if not m.isfile():
+                    continue
+                files_found.add(m.name)
+                f = tf.extractfile(m)
+                if f is None:
+                    continue
+                data = f.read()
+                if m.name == "environment/Dockerfile":
+                    dockerfile_content = data.decode(errors="replace")
+                elif m.name == "setup_files/metadata.json":
+                    metadata_content = data
     except Exception as e:
         return {"path": path, "issues": [f"Cannot read tarball: {e}"]}
 
@@ -54,24 +70,46 @@ def validate_tarball(task_binary: bytes, path: str) -> dict:
         if req not in files_found:
             issues.append(f"Missing: {req}")
 
-    # At least one test_*.py file
-    test_files = [f for f in files_found if f.startswith("tests/test_") and f.endswith(".py") and f != "tests/test_state.py"]
+    # At least one injected test_*.py file
+    test_files = [
+        f for f in files_found
+        if f.startswith("tests/test_") and f.endswith(".py") and f != "tests/test_state.py"
+    ]
     if not test_files:
         issues.append("No test_*.py files found in tests/")
 
-    # Check Dockerfile content
-    if "environment/Dockerfile" in files_found:
-        with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
-            df = tf.extractfile(tf.getmember("environment/Dockerfile")).read().decode()
-            if "namanjain12" in df:
-                issues.append("Dockerfile still uses original per-commit image")
+    # BUG 2 FIX: check that Dockerfile FROM line is one of the 10 known shared
+    # base images (all under namanjain12/).  The old check was inverted — it
+    # flagged every correctly-patched task because the shared images ARE hosted
+    # under namanjain12/.
+    if dockerfile_content is not None:
+        from_line = next(
+            (line.strip() for line in dockerfile_content.splitlines()
+             if line.strip().upper().startswith("FROM")),
+            "",
+        )
+        image_ref = from_line[len("FROM"):].strip()
+        if image_ref not in _SHARED_BASE_IMAGE_SET:
+            issues.append(
+                f"Dockerfile FROM is not a known shared base image: {image_ref!r}"
+            )
 
     # Check metadata has expected_output_json
-    if "setup_files/metadata.json" in files_found:
-        with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
-            meta = json.loads(tf.extractfile(tf.getmember("setup_files/metadata.json")).read())
+    if metadata_content is not None:
+        try:
+            meta = json.loads(metadata_content)
             if "expected_output_json" not in meta:
                 issues.append("metadata.json missing expected_output_json")
+            else:
+                # Verify it is parseable (it is stored as a JSON string)
+                exp_raw = meta["expected_output_json"]
+                if isinstance(exp_raw, str):
+                    try:
+                        json.loads(exp_raw)
+                    except json.JSONDecodeError:
+                        issues.append("expected_output_json is a string but not valid JSON")
+        except json.JSONDecodeError:
+            issues.append("setup_files/metadata.json is not valid JSON")
 
     return {
         "path": path,
@@ -112,7 +150,7 @@ def main():
     total = 0
     valid = 0
     unique_dfs = set()
-    repo_counts = {}
+    repo_counts: dict[str, int] = {}
     all_issues = []
 
     for i, row in enumerate(ds):
@@ -131,15 +169,17 @@ def main():
             if args.verbose and len(all_issues) <= 20:
                 print(f"  ISSUES [{path}]: {result['issues']}")
 
-        # Track Dockerfiles
+        # Track unique Dockerfiles and repos (single open, already done in validate_tarball)
         try:
             with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
-                df = tf.extractfile(tf.getmember("environment/Dockerfile")).read().decode()
-                unique_dfs.add(df[:100])  # first 100 chars as key
-                # Track repo
-                meta = json.loads(tf.extractfile(tf.getmember("setup_files/metadata.json")).read())
-                repo = meta.get("repo_name", "unknown")
-                repo_counts[repo] = repo_counts.get(repo, 0) + 1
+                members = {m.name: m for m in tf.getmembers() if m.isfile()}
+                if "environment/Dockerfile" in members:
+                    df = tf.extractfile(members["environment/Dockerfile"]).read().decode()
+                    unique_dfs.add(df[:120])
+                if "setup_files/metadata.json" in members:
+                    meta = json.loads(tf.extractfile(members["setup_files/metadata.json"]).read())
+                    repo = meta.get("repo_name", "unknown")
+                    repo_counts[repo] = repo_counts.get(repo, 0) + 1
         except Exception:
             pass
 
@@ -149,12 +189,12 @@ def main():
     print(f"\n{'='*60}")
     print(f"VALIDATION RESULTS")
     print(f"{'='*60}")
-    print(f"  Total:   {total}")
-    print(f"  Valid:   {valid}")
-    print(f"  Issues:  {total - valid}")
-    print(f"  Unique Dockerfiles: {len(unique_dfs)}")
+    print(f"  Total:              {total}")
+    print(f"  Valid:              {valid}")
+    print(f"  Issues:             {total - valid}")
+    print(f"  Unique Dockerfiles: {len(unique_dfs)}  (expected: 10)")
     print()
-    print(f"Per-repo:")
+    print(f"Per-repo task counts:")
     for repo, count in sorted(repo_counts.items(), key=lambda x: -x[1]):
         print(f"  {repo}: {count}")
 

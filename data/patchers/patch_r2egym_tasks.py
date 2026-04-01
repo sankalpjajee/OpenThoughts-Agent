@@ -18,15 +18,15 @@ The shared images are picked from representative namanjain12 images already
 cached on Daytona. The agent performs 'git checkout <commit>' at runtime.
 
 Usage (on cluster):
-    # Run the patcher (test with 30 tasks first):
-    python data/patchers/patch_r2egym_tasks.py \
-        --output-dir /mnt/sda4T/home/jajee/r2egym_patched_v7 \
+    # Test with 30 tasks first:
+    HF_TOKEN=... python data/patchers/patch_r2egym_tasks.py \
+        --output-dir /mnt/sda4T/home/jajee/r2egym_patched_v8_full \
         --limit 30
 
     # Full run + upload:
-    python data/patchers/patch_r2egym_tasks.py \
-        --output-dir /mnt/sda4T/home/jajee/r2egym_patched_v7 \
-        --upload-to SankalpKJ/r2egym-patched-v7
+    HF_TOKEN=... python data/patchers/patch_r2egym_tasks.py \
+        --output-dir /mnt/sda4T/home/jajee/r2egym_patched_v8_full \
+        --upload-to SankalpKJ/r2egym-patched-v8-full
 """
 from __future__ import annotations
 
@@ -44,16 +44,16 @@ from datasets import load_dataset, load_from_disk
 # ---------------------------------------------------------------------------
 
 _SHARED_BASE_IMAGES = {
-    'aiohttp': 'namanjain12/aiohttp_final:f0d74880deec8fcd982bce639c93c5e130d41198',
+    'aiohttp':    'namanjain12/aiohttp_final:f0d74880deec8fcd982bce639c93c5e130d41198',
     'coveragepy': 'namanjain12/coveragepy_final:c1bfa7352368b63f3a9b30c02f242408d07a7ab2',
-    'datalad': 'namanjain12/datalad_final:f5e1d276ab51aefcf5e48e6f7bd9833b19ef7f90',
-    'numpy': 'namanjain12/numpy_final:14445500bdf67600f926c6426bad55977441dca0',
-    'orange3': 'namanjain12/orange3_final:2d9617bd0cb1f0ba61771258410ab8fae8e7e24d',
-    'pandas': 'namanjain12/pandas_final:fadb72cf5ef8489e409d4d33625bd16a76fa7a42',
-    'pillow': 'namanjain12/pillow_final:f644adbb05d615a9902ef3643714d5fe8049cea3',
-    'pyramid': 'namanjain12/pyramid_final:fbbb20c7953370c86f999e865b1a9d682690eb70',
-    'scrapy': 'namanjain12/scrapy_final:fbb411a805724fec50b786f369be79dc221c798e',
-    'tornado': 'namanjain12/tornado_final:b5ec807edc83c8e7d1d12553d635ebe765e5c614',
+    'datalad':    'namanjain12/datalad_final:f5e1d276ab51aefcf5e48e6f7bd9833b19ef7f90',
+    'numpy':      'namanjain12/numpy_final:14445500bdf67600f926c6426bad55977441dca0',
+    'orange3':    'namanjain12/orange3_final:2d9617bd0cb1f0ba61771258410ab8fae8e7e24d',
+    'pandas':     'namanjain12/pandas_final:fadb72cf5ef8489e409d4d33625bd16a76fa7a42',
+    'pillow':     'namanjain12/pillow_final:f644adbb05d615a9902ef3643714d5fe8049cea3',
+    'pyramid':    'namanjain12/pyramid_final:fbbb20c7953370c86f999e865b1a9d682690eb70',
+    'scrapy':     'namanjain12/scrapy_final:fbb411a805724fec50b786f369be79dc221c798e',
+    'tornado':    'namanjain12/tornado_final:b5ec807edc83c8e7d1d12553d635ebe765e5c614',
 }
 
 # ---------------------------------------------------------------------------
@@ -64,11 +64,11 @@ def _build_dockerfile(repo_name: str) -> str:
     base_image = _SHARED_BASE_IMAGES.get(repo_name)
     if not base_image:
         raise ValueError(f"No shared base image for repo: {repo_name}")
-    
+
     return f"""\
 FROM {base_image}
 
-# Shared per-repo base image. 
+# Shared per-repo base image.
 # Agent MUST perform: cd /testbed && git checkout <commit>
 # to get to the correct task state.
 
@@ -76,7 +76,13 @@ RUN mkdir -p /logs /r2e_tests /setup_files
 """
 
 # ---------------------------------------------------------------------------
-# test.sh template
+# test.sh template  (BUG 4 + BUG 5 fixed)
+#
+# FIX 4: expected_output_json is a JSON string in metadata.json, not a dict.
+#         Must call json.loads() on it before iterating.
+# FIX 5: pytest nodeid format is "path/test_file.py::ClassName::test_method"
+#         but expected_output_json keys are "ClassName.test_method".
+#         Build a lookup that normalises both sides to "ClassName.test_method".
 # ---------------------------------------------------------------------------
 
 _TEST_SH = """\
@@ -88,17 +94,21 @@ _TEST_SH = """\
 
 set -x
 
-# Ensure log directory exists
 mkdir -p /logs/verifier
 
+# Install pytest-json-report if not present
+pip install pytest-json-report -q 2>/dev/null || true
+
 # 1. Run tests
-# We use -p no:terminal to keep output clean for parsing
-pytest /tests/test_*.py --json-report --json-report-file=/logs/pytest_results.json || true
+pytest /tests/test_*.py \
+    --json-report \
+    --json-report-file=/logs/pytest_results.json \
+    -p no:terminal \
+    || true
 
 # 2. Calculate reward
-# We use a small python script to compare pytest results with metadata.json
-python3 -c "
-import json
+python3 - <<'PYEOF'
+import json, sys
 from pathlib import Path
 
 def calculate():
@@ -106,34 +116,67 @@ def calculate():
         # Load expected results from metadata
         meta_path = Path('/setup_files/metadata.json')
         if not meta_path.exists():
+            print('ERROR: /setup_files/metadata.json not found')
             return 0.0
         meta = json.loads(meta_path.read_text())
-        expected = meta.get('expected_output_json', {})
-        
-        # Load actual results from pytest
+
+        # FIX 4: expected_output_json is stored as a JSON string, not a dict
+        expected_raw = meta.get('expected_output_json', {})
+        if isinstance(expected_raw, str):
+            expected = json.loads(expected_raw)
+        else:
+            expected = expected_raw
+
+        if not expected:
+            print('WARNING: expected_output_json is empty')
+            return 0.0
+
+        # Load actual pytest results
         report_path = Path('/logs/pytest_results.json')
         if not report_path.exists():
+            print('ERROR: /logs/pytest_results.json not found')
             return 0.0
         report = json.loads(report_path.read_text())
-        
+
+        # FIX 5: Build lookup keyed by "ClassName.test_method" to match
+        # expected_output_json format.  pytest nodeid is one of:
+        #   tests/test_foo.py::ClassName::test_method   -> ClassName.test_method
+        #   tests/test_foo.py::test_function            -> test_function
         actual_results = {}
         for test in report.get('tests', []):
-            name = test['nodeid'].split('::')[-1]
-            actual_results[name] = 'passed' if test['outcome'] == 'passed' else 'failed'
-            
-        # Compare
+            nodeid = test['nodeid']          # e.g. tests/test_foo.py::Cls::test_bar
+            parts  = nodeid.split('::')      # ['tests/test_foo.py', 'Cls', 'test_bar']
+            key    = '.'.join(parts[1:])     # 'Cls.test_bar'  or  'test_bar'
+            status = 'PASSED' if test['outcome'] == 'passed' else 'FAILED'
+            actual_results[key] = status
+
+        # Compare: all expected tests must match
+        mismatches = []
         for test_name, expected_status in expected.items():
-            if actual_results.get(test_name) != expected_status:
-                return 0.0
+            actual_status = actual_results.get(test_name)
+            if actual_status != expected_status:
+                mismatches.append(
+                    f'  {test_name}: expected={expected_status} actual={actual_status}'
+                )
+
+        if mismatches:
+            print('MISMATCHES:')
+            for m in mismatches:
+                print(m)
+            return 0.0
+
         return 1.0
+
     except Exception as e:
+        import traceback
         print(f'Error calculating reward: {e}')
+        traceback.print_exc()
         return 0.0
 
 reward = calculate()
 Path('/logs/verifier/reward.txt').write_text(str(reward))
 print(f'REWARD: {reward}')
-"
+PYEOF
 """
 
 # ---------------------------------------------------------------------------
@@ -184,12 +227,12 @@ cd /testbed && git checkout {base_commit}
 # ---------------------------------------------------------------------------
 
 _REPO_ALIASES = {
-    "orange3": "orange3",
-    "pillow": "pillow",
-    "pil": "pillow",
-    "coverage": "coveragepy",
+    "orange3":    "orange3",
+    "pillow":     "pillow",
+    "pil":        "pillow",
+    "coverage":   "coveragepy",
     "coveragepy": "coveragepy",
-    "coverage.py": "coveragepy",
+    "coverage.py":"coveragepy",
 }
 
 ALL_REPOS = set(_SHARED_BASE_IMAGES.keys())
@@ -201,7 +244,7 @@ def _repo_name_from_string(raw: str) -> str | None:
         return short
     if short in _REPO_ALIASES:
         return _REPO_ALIASES[short]
-    # fuzzy
+    # fuzzy match
     return next(
         (k for k in ALL_REPOS if short.startswith(k) or k.startswith(short)),
         None,
@@ -247,7 +290,7 @@ def repack_task(
     # 1. Dockerfile — use shared per-repo base image
     replacements["environment/Dockerfile"] = _build_dockerfile(repo_name).encode()
 
-    # 2. test.sh
+    # 2. test.sh (with reward logic fixes)
     replacements["tests/test.sh"] = _TEST_SH.encode()
 
     # 3. test_state.py
@@ -260,19 +303,24 @@ def repack_task(
         replacements[fname] = code.encode()
 
     # 5. setup_files/metadata.json
-    meta_bytes = existing.get("environment/workspace/metadata.json", existing.get("setup_files/metadata.json", b"{}"))
+    meta_bytes = existing.get(
+        "environment/workspace/metadata.json",
+        existing.get("setup_files/metadata.json", b"{}"),
+    )
     replacements["setup_files/metadata.json"] = meta_bytes
 
     # 6. solution/solve.sh
-    replacements["solution/solve.sh"] = _SOLVE_SH_TEMPLATE.format(base_commit=base_commit).encode()
+    replacements["solution/solve.sh"] = _SOLVE_SH_TEMPLATE.format(
+        base_commit=base_commit
+    ).encode()
 
-    # 7. instruction.md
+    # 7. instruction.md — prepend setup preamble if not already present
     orig_instruction = existing.get("instruction.md", b"")
     if b"## Environment Setup" not in orig_instruction:
         preamble = _SETUP_PREAMBLE.format(base_commit=base_commit).encode()
         replacements["instruction.md"] = preamble + orig_instruction
 
-    # Merge
+    # Merge: existing files take replacements, then add any new files
     new_files: dict[str, bytes] = {}
     for name, data in existing.items():
         new_files[name] = replacements.pop(name, data)
@@ -307,74 +355,95 @@ def repack_task(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--upload-to", type=str, default=None)
+    parser = argparse.ArgumentParser(description="Patch R2E-Gym tasks to use 10 shared base images")
+    parser.add_argument("--output-dir", required=True, help="Local directory to save patched dataset")
+    parser.add_argument("--limit", type=int, default=None, help="Only patch first N tasks (for testing)")
+    parser.add_argument("--upload-to", type=str, default=None, help="HuggingFace repo to upload to")
     args = parser.parse_args()
 
+    hf_token = os.environ.get("HF_TOKEN")
+
     print("Loading R2E-Gym-Lite (test files)...")
-    lite_ds = load_dataset("R2E-Gym/R2E-Gym-Lite", split="train", token=os.environ.get("HF_TOKEN"))
+    lite_ds = load_dataset("R2E-Gym/R2E-Gym-Lite", split="train", token=hf_token)
+    # Key by commit_hash — this is what sandbox metadata.base_commit matches
     commit_to_tests = {row["commit_hash"]: row for row in lite_ds}
-    print(f"Loaded {len(commit_to_tests)} test sets.")
+    print(f"Loaded {len(commit_to_tests)} test sets from R2E-Gym-Lite.")
 
     print("Loading DCAgent2/r2egym_sandboxes (tarballs)...")
-    sandboxes_ds = load_dataset("DCAgent2/r2egym_sandboxes", split="train", token=os.environ.get("HF_TOKEN"))
+    sandboxes_ds = load_dataset("DCAgent2/r2egym_sandboxes", split="train", token=hf_token)
     if args.limit:
         sandboxes_ds = sandboxes_ds.select(range(args.limit))
+    print(f"Processing {len(sandboxes_ds)} sandbox tasks...")
 
     patched_rows = []
+    skipped = 0
+    errors = 0
+
     for i, row in enumerate(sandboxes_ds):
         try:
-            # Match by commit hash
-            # Original tarball has metadata.json inside
-            with tarfile.open(fileobj=io.BytesIO(bytes(row["task_binary"])), mode="r:gz") as tf:
+            task_binary = bytes(row["task_binary"])
+
+            # Extract commit hash from tarball metadata
+            with tarfile.open(fileobj=io.BytesIO(task_binary), mode="r:gz") as tf:
                 meta = None
                 for p in ["environment/workspace/metadata.json", "setup_files/metadata.json"]:
                     try:
                         meta = json.loads(tf.extractfile(p).read())
                         break
-                    except: pass
-                
-                if not meta: continue
-                commit = meta.get("base_commit") or meta.get("new_commit_hash")
-                
-                if commit not in commit_to_tests:
-                    print(f"[{i}] Skip: commit {commit} not in Lite dataset")
-                    continue
-                
-                lite_row = commit_to_tests[commit]
-                
-                # Parse execution_result_content safely
-                erc_raw = lite_row.get("execution_result_content")
-                if not erc_raw:
-                    print(f"[{i}] Skip: execution_result_content is empty for {commit[:8]}")
-                    continue
-                
-                try:
-                    erc = json.loads(erc_raw) if isinstance(erc_raw, str) else erc_raw
-                except json.JSONDecodeError:
-                    print(f"[{i}] Skip: execution_result_content is not valid JSON for {commit[:8]}")
-                    continue
-                
-                test_file_names = erc.get("test_file_names", [])
-                test_file_codes = erc.get("test_file_codes", [])
-                
-                if not test_file_names or not test_file_codes:
-                    print(f"[{i}] Skip: missing test files in execution_result_content for {commit[:8]}")
-                    continue
-                
-                new_binary = repack_task(
-                    bytes(row["task_binary"]),
-                    test_file_names,
-                    test_file_codes
-                )
-                
-                row["task_binary"] = new_binary
-                patched_rows.append(row)
-                print(f"[{i}] Patched: {meta.get('repo_name')} @ {commit[:8]}")
+                    except Exception:
+                        pass
+
+            if not meta:
+                print(f"[{i}] Skip: no metadata.json in tarball")
+                skipped += 1
+                continue
+
+            commit = meta.get("base_commit") or meta.get("new_commit_hash")
+            if not commit:
+                print(f"[{i}] Skip: no commit hash in metadata")
+                skipped += 1
+                continue
+
+            if commit not in commit_to_tests:
+                print(f"[{i}] Skip: commit {commit[:8]} not in R2E-Gym-Lite")
+                skipped += 1
+                continue
+
+            lite_row = commit_to_tests[commit]
+
+            # BUG 1 FIX: test_file_names/codes are nested inside execution_result_content
+            # (a JSON string), not top-level columns. Parse safely.
+            erc_raw = lite_row.get("execution_result_content")
+            if not erc_raw:
+                print(f"[{i}] Skip: execution_result_content is empty for {commit[:8]}")
+                skipped += 1
+                continue
+
+            try:
+                erc = json.loads(erc_raw) if isinstance(erc_raw, str) else erc_raw
+            except json.JSONDecodeError:
+                print(f"[{i}] Skip: execution_result_content is not valid JSON for {commit[:8]}")
+                skipped += 1
+                continue
+
+            test_file_names = erc.get("test_file_names", [])
+            test_file_codes = erc.get("test_file_codes", [])
+
+            if not test_file_names or not test_file_codes:
+                print(f"[{i}] Skip: no test files in execution_result_content for {commit[:8]}")
+                skipped += 1
+                continue
+
+            new_binary = repack_task(task_binary, test_file_names, test_file_codes)
+            row["task_binary"] = new_binary
+            patched_rows.append(row)
+            print(f"[{i}] Patched: {meta.get('repo_name')} @ {commit[:8]} ({len(test_file_names)} test files)")
+
         except Exception as e:
             print(f"[{i}] Error: {e}")
+            errors += 1
+
+    print(f"\nDone: {len(patched_rows)} patched, {skipped} skipped, {errors} errors")
 
     from datasets import Dataset
     out_ds = Dataset.from_list(patched_rows)
@@ -382,8 +451,8 @@ def main() -> None:
     print(f"Saved {len(out_ds)} tasks to {args.output_dir}")
 
     if args.upload_to:
-        out_ds.push_to_hub(args.upload_to, token=os.environ.get("HF_TOKEN"))
-        print(f"Uploaded to {args.upload_to}")
+        out_ds.push_to_hub(args.upload_to, token=hf_token)
+        print(f"Uploaded to https://huggingface.co/datasets/{args.upload_to}")
 
 if __name__ == "__main__":
     main()
