@@ -344,11 +344,26 @@ def main() -> None:
                     continue
                 
                 lite_row = commit_to_tests[commit]
-                # test_file_names and test_file_codes are nested inside
-                # execution_result_content (a JSON string)
-                erc = json.loads(lite_row["execution_result_content"])
-                test_file_names = erc["test_file_names"]
-                test_file_codes = erc["test_file_codes"]
+                
+                # Parse execution_result_content safely
+                erc_raw = lite_row.get("execution_result_content")
+                if not erc_raw:
+                    print(f"[{i}] Skip: execution_result_content is empty for {commit[:8]}")
+                    continue
+                
+                try:
+                    erc = json.loads(erc_raw) if isinstance(erc_raw, str) else erc_raw
+                except json.JSONDecodeError:
+                    print(f"[{i}] Skip: execution_result_content is not valid JSON for {commit[:8]}")
+                    continue
+                
+                test_file_names = erc.get("test_file_names", [])
+                test_file_codes = erc.get("test_file_codes", [])
+                
+                if not test_file_names or not test_file_codes:
+                    print(f"[{i}] Skip: missing test files in execution_result_content for {commit[:8]}")
+                    continue
+                
                 new_binary = repack_task(
                     bytes(row["task_binary"]),
                     test_file_names,
