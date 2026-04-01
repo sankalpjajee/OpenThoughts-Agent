@@ -344,10 +344,15 @@ def main() -> None:
                     continue
                 
                 lite_row = commit_to_tests[commit]
+                # test_file_names and test_file_codes are nested inside
+                # execution_result_content (a JSON string)
+                erc = json.loads(lite_row["execution_result_content"])
+                test_file_names = erc["test_file_names"]
+                test_file_codes = erc["test_file_codes"]
                 new_binary = repack_task(
                     bytes(row["task_binary"]),
-                    lite_row["test_file_names"],
-                    lite_row["test_file_codes"]
+                    test_file_names,
+                    test_file_codes
                 )
                 
                 row["task_binary"] = new_binary
