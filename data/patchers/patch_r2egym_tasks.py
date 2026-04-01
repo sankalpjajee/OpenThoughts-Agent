@@ -83,32 +83,33 @@ RUN mkdir -p /logs /r2e_tests /setup_files
 # FIX 5: pytest nodeid format is "path/test_file.py::ClassName::test_method"
 #         but expected_output_json keys are "ClassName.test_method".
 #         Build a lookup that normalises both sides to "ClassName.test_method".
+# FIX 6: pytest-json-report crashes on Python 3.7 (AttributeError: tbstyle).
+#         Use pytest --tb=line -v and parse the verbose stdout instead.
+#         This works on Python 3.6+ without any extra plugins.
 # ---------------------------------------------------------------------------
 
 _TEST_SH = """\
 #!/bin/bash
 # R2E-Gym test runner with reward calculation.
-# 1. Run pytest on injected test files.
-# 2. Compare results to expected_output_json.
+# 1. Run pytest on injected test files (Python 3.7-compatible, no extra plugins).
+# 2. Compare results to expected_output_json from metadata.
 # 3. Write reward (0.0 or 1.0) to /logs/verifier/reward.txt.
 
 set -x
 
 mkdir -p /logs/verifier
 
-# Install pytest-json-report if not present
-pip install pytest-json-report -q 2>/dev/null || true
-
-# 1. Run tests
-pytest /tests/test_*.py \
-    --json-report \
-    --json-report-file=/logs/pytest_results.json \
-    -p no:terminal \
-    || true
+# 1. Run tests — use -v so each result line is "PASSED" or "FAILED",
+#    exclude test_state.py (it is a reward reader, not a test).
+#    Write output to a log file for parsing.
+pytest /tests/test_*.py \\
+    --ignore=/tests/test_state.py \\
+    -v --tb=short \\
+    2>&1 | tee /logs/pytest_output.txt || true
 
 # 2. Calculate reward
 python3 - <<'PYEOF'
-import json, sys
+import json, re, sys
 from pathlib import Path
 
 def calculate():
@@ -131,24 +132,28 @@ def calculate():
             print('WARNING: expected_output_json is empty')
             return 0.0
 
-        # Load actual pytest results
-        report_path = Path('/logs/pytest_results.json')
-        if not report_path.exists():
-            print('ERROR: /logs/pytest_results.json not found')
+        # FIX 6: Parse pytest -v stdout instead of pytest-json-report.
+        # Verbose pytest lines look like:
+        #   tests/test_foo.py::ClassName::test_method PASSED
+        #   tests/test_foo.py::test_function FAILED
+        output_path = Path('/logs/pytest_output.txt')
+        if not output_path.exists():
+            print('ERROR: /logs/pytest_output.txt not found')
             return 0.0
-        report = json.loads(report_path.read_text())
 
-        # FIX 5: Build lookup keyed by "ClassName.test_method" to match
-        # expected_output_json format.  pytest nodeid is one of:
-        #   tests/test_foo.py::ClassName::test_method   -> ClassName.test_method
-        #   tests/test_foo.py::test_function            -> test_function
         actual_results = {}
-        for test in report.get('tests', []):
-            nodeid = test['nodeid']          # e.g. tests/test_foo.py::Cls::test_bar
-            parts  = nodeid.split('::')      # ['tests/test_foo.py', 'Cls', 'test_bar']
-            key    = '.'.join(parts[1:])     # 'Cls.test_bar'  or  'test_bar'
-            status = 'PASSED' if test['outcome'] == 'passed' else 'FAILED'
-            actual_results[key] = status
+        # Match lines ending with PASSED, FAILED, ERROR, SKIPPED
+        line_re = re.compile(r'^(\S+)\s+(PASSED|FAILED|ERROR|SKIPPED)', re.MULTILINE)
+        for m in line_re.finditer(output_path.read_text()):
+            nodeid = m.group(1)   # e.g. tests/test_foo.py::Cls::test_bar
+            outcome = m.group(2)  # PASSED / FAILED / ERROR / SKIPPED
+            parts = nodeid.split('::')
+            # FIX 5: join class + method with '.' to match expected_output_json keys
+            key = '.'.join(parts[1:])  # 'Cls.test_bar' or 'test_bar'
+            actual_results[key] = outcome
+
+        print('Actual results:', actual_results)
+        print('Expected:', expected)
 
         # Compare: all expected tests must match
         mismatches = []
@@ -156,7 +161,7 @@ def calculate():
             actual_status = actual_results.get(test_name)
             if actual_status != expected_status:
                 mismatches.append(
-                    f'  {test_name}: expected={expected_status} actual={actual_status}'
+                    '  {}: expected={} actual={}'.format(test_name, expected_status, actual_status)
                 )
 
         if mismatches:
@@ -169,13 +174,13 @@ def calculate():
 
     except Exception as e:
         import traceback
-        print(f'Error calculating reward: {e}')
+        print('Error calculating reward: {}'.format(e))
         traceback.print_exc()
         return 0.0
 
 reward = calculate()
 Path('/logs/verifier/reward.txt').write_text(str(reward))
-print(f'REWARD: {reward}')
+print('REWARD: {}'.format(reward))
 PYEOF
 """
 
