@@ -95,6 +95,11 @@ FROM {base_image}
 # to get to the correct task state.
 {extra_lines}
 RUN mkdir -p /logs /r2e_tests /setup_files
+
+# WORKDIR must come last so that _ensure_output_dir_in_dockerfile
+# (in validate_and_upload_from_hf.py) inserts RUN mkdir /output AFTER
+# WORKDIR and not before FROM (which would break the build).
+WORKDIR /testbed
 """
 
 # ---------------------------------------------------------------------------
