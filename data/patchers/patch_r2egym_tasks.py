@@ -118,18 +118,17 @@ WORKDIR /testbed
 _TEST_SH = """\
 #!/bin/bash
 # R2E-Gym test runner with reward calculation.
-# 1. Ensure repo deps are installed (handles missing packages like xlsxwriter).
-# 2. Run pytest on injected test files (Python 3.7-compatible, no extra plugins).
-# 3. Compare results to expected_output_json from metadata.
-# 4. Write reward (0.0 or 1.0) to /logs/verifier/reward.txt.
+# 1. git checkout the fixed commit (done by solve.sh / agent).
+# 2. Install repo requirements to match the exact commit environment.
+# 3. Run pytest on injected test files.
+# 4. Compare results to expected_output_json from metadata.
+# 5. Write reward (0.0 or 1.0) to /logs/verifier/reward.txt.
 
 set -x
 
 mkdir -p /logs/verifier
 
-# 0. Reinstall the repo in editable mode to pick up any missing deps.
-#    The agent may have checked out a different commit with new requirements.
-#    Use the venv if present, otherwise fall back to system pip.
+# Resolve pip: prefer the venv that R2E-Gym created, fall back to system pip.
 if [ -f /testbed/.venv/bin/pip ]; then
     PIP=/testbed/.venv/bin/pip
 elif [ -f /testbed/.venv/bin/pip3 ]; then
@@ -137,12 +136,28 @@ elif [ -f /testbed/.venv/bin/pip3 ]; then
 else
     PIP=pip
 fi
-cd /testbed && $PIP install -e . -q 2>/dev/null || true
 
-# 0b. Rebuild Cython extensions in-place to match the checked-out commit.
+cd /testbed
+
+# 0. Install all requirements from the repo at the checked-out commit.
+#    R2E-Gym used: uv pip install -U -r requirements-dev.txt
+#    We replicate that with regular pip (uv may not be available).
+#    Try the most common requirements file names in priority order.
+for REQ in requirements-dev.txt requirements_dev.txt requirements-test.txt requirements_test.txt requirements.txt; do
+    if [ -f "/testbed/$REQ" ]; then
+        $PIP install -q -r "/testbed/$REQ" 2>/dev/null || true
+        break
+    fi
+done
+
+# 0b. Reinstall the repo itself in editable mode (picks up any new entry points
+#     or C extensions declared in setup.py / pyproject.toml).
+$PIP install -e . -q 2>/dev/null || true
+
+# 0c. Rebuild Cython extensions in-place for the checked-out commit.
 #     Skips if setup.py doesn't exist or build fails (non-Cython repos).
 if [ -f /testbed/setup.py ]; then
-    cd /testbed && python setup.py build_ext --inplace -q 2>/dev/null || true
+    python setup.py build_ext --inplace -q 2>/dev/null || true
 fi
 
 # 1. Run tests — use -v so each result line is "PASSED" or "FAILED",
