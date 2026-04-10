@@ -505,15 +505,36 @@ def main() -> None:
                 continue
 
             # Skip GUI widget tasks: Orange3 OW* tests require a Qt display and
-            # crash pytest with SIGABRT in headless containers. Filter them out
-            # if ALL test file names are OW* (pure GUI task).
-            gui_only = all(
+            # crash pytest with SIGABRT in headless containers.
+            #
+            # Filter strategy: check the expected_output_json test class names.
+            # Orange3 widget tests use class names like TestOWRank, TestOWDataSets,
+            # WidgetTest, etc. These crash with "Fatal Python error: Aborted" in
+            # headless containers regardless of the test file name (which is often
+            # just test_1.py, not test_OW*.py).
+            #
+            # Also check test file names as a secondary filter.
+            expected_raw = lite_row.get('expected_output_json', '{}')
+            if isinstance(expected_raw, str):
+                expected_dict = json.loads(expected_raw) if expected_raw else {}
+            else:
+                expected_dict = expected_raw or {}
+
+            _GUI_PREFIXES = ("OW", "ow", "TestOW", "TestWidget", "WidgetTest")
+
+            # GUI if ANY expected test class starts with a GUI prefix
+            gui_by_class = any(
+                k.split(".")[0].startswith(_GUI_PREFIXES)
+                for k in expected_dict.keys()
+            )
+            # GUI if ALL test file names are OW* (original file-name filter)
+            gui_by_file = bool(test_file_names) and all(
                 any(part.startswith(("OW", "ow", "test_OW", "test_ow"))
                     for part in fname.replace("\\", "/").split("/"))
                 for fname in test_file_names
             )
-            if gui_only:
-                print(f"[{i}] Skip: GUI-only task (OW* tests) for {commit[:8]}")
+            if gui_by_class or gui_by_file:
+                print(f"[{i}] Skip: GUI/widget task for {commit[:8]}")
                 skipped += 1
                 continue
 
