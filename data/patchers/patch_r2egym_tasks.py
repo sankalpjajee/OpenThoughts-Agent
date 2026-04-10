@@ -175,11 +175,25 @@ done
 $PIP install -e . -q 2>&1 | tail -5 || true
 
 # 0c. Install common test dependencies that are often missing.
-$PIP install -q mock appdirs defusedxml gitpython openpyxl 2>&1 | tail -3 || true
+# Covers all repos seen in R2E-Gym-Lite failure analysis:
+#   PIL/Pillow (pillow repo, 433 tasks)
+#   mock (orange3, 69 tasks)
+#   appdirs (orange3, 90 tasks)
+#   importlib-metadata (multiple repos, 40 tasks)
+#   itemadapter (scrapy, 21 tasks)
+#   pyramid (pyramid repo, 11 tasks)
+#   defusedxml, gitpython, openpyxl (misc)
+$PIP install -q \\
+    Pillow mock appdirs defusedxml gitpython openpyxl \\
+    importlib-metadata itemadapter pyramid \\
+    2>&1 | tail -5 || true
 
 # 1. Run tests.
-#    Add /tests to PYTHONPATH so helper modules in /tests are importable.
-PYTHONPATH=/tests:$PYTHONPATH $PYTHON -m pytest /tests/test_*.py \\
+#    PYTHONPATH includes:
+#      /tests        - so 'helper' and other test-local modules are importable
+#      /testbed/tests - so 'tests' package imports work (pandas, etc.)
+#      /testbed      - so the repo source is on the path
+PYTHONPATH=/tests:/testbed/tests:/testbed:$PYTHONPATH $PYTHON -m pytest /tests/test_*.py \\
     --ignore=/tests/test_state.py \\
     --ignore-glob=/tests/test_OW*.py \\
     -v --tb=short \\
