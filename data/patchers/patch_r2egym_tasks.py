@@ -60,8 +60,28 @@ _SHARED_BASE_IMAGES = {
 # Dockerfile builder
 # ---------------------------------------------------------------------------
 
-# Per-repo extra dependencies that may be missing from the base image.
-# These are installed at container build time so tests can import them.
+# Common test dependencies pre-installed in ALL repo images.
+# Installed at Docker build time so test.sh has zero pip overhead.
+_COMMON_TEST_DEPS = [
+    # Image/media
+    'Pillow',
+    # Test utilities
+    'mock', 'unittest-mixins',
+    # System/path utilities
+    'appdirs', 'setuptools', 'importlib-metadata',
+    # Data formats
+    'defusedxml', 'openpyxl',
+    # VCS
+    'gitpython',
+    # Web frameworks (pyramid tasks)
+    'pyramid', 'plaster', 'plaster-pastedeploy',
+    # Scrapy ecosystem
+    'itemadapter',
+    # Misc
+    'boto3', 'trubar',
+]
+
+# Per-repo extra dependencies on top of the common set.
 _EXTRA_DEPS: dict[str, list[str]] = {
     'orange3':    ['xlsxwriter', 'anyqt', 'serverfiles'],
     'aiohttp':    [],
@@ -81,11 +101,19 @@ def _build_dockerfile(repo_name: str) -> str:
     if not base_image:
         raise ValueError(f"No shared base image for repo: {repo_name}")
 
+    common_pkgs = ' '.join(_COMMON_TEST_DEPS)
     extra_deps = _EXTRA_DEPS.get(repo_name, [])
     extra_lines = ""
     if extra_deps:
         pkgs = ' '.join(extra_deps)
-        extra_lines = f"\n# Install extra deps missing from base image\nRUN pip install {pkgs} -q 2>/dev/null || true\n"
+        extra_lines = f"\nRUN pip install {pkgs} -q 2>/dev/null || true"
+
+    # Determine which pip to use: venv if present, else system
+    pip_cmd = """RUN if [ -f /testbed/.venv/bin/python ]; then \\
+        /testbed/.venv/bin/python -m pip install {pkgs} -q 2>/dev/null || true; \\
+    else \\
+        pip3 install {pkgs} -q 2>/dev/null || true; \\
+    fi""".format(pkgs=common_pkgs)
 
     return f"""\
 FROM {base_image}
@@ -93,7 +121,10 @@ FROM {base_image}
 # Shared per-repo base image.
 # Agent MUST perform: cd /testbed && git checkout <commit>
 # to get to the correct task state.
-{extra_lines}
+
+# Pre-install common test dependencies (avoids slow pip installs at test time)
+{pip_cmd}{extra_lines}
+
 RUN mkdir -p /logs /r2e_tests /setup_files
 
 # WORKDIR must come last so that _ensure_output_dir_in_dockerfile
@@ -149,49 +180,23 @@ PIP="$PYTHON -m pip"
 cd /testbed
 
 # ---------------------------------------------------------------------------
-# CRITICAL for numpy/scipy: after git checkout, the Cython-compiled .so files
-# are stale (compiled for the previous commit). We MUST rebuild them before
-# running any tests. This is the primary cause of:
-#   ImportError: Something is wrong with the numpy installation.
-#   ImportError: cannot import name 'scalarmath' from 'numpy.core'
+# CRITICAL for numpy/scipy/aiohttp: after git checkout, the Cython-compiled
+# .so files are stale (compiled for the previous commit). We MUST rebuild
+# them before running any tests.
+# Touch all .pyx files first to force incremental rebuild - git checkout
+# preserves timestamps so build_ext would skip unchanged files otherwise.
 # ---------------------------------------------------------------------------
 if [ -f /testbed/setup.py ]; then
     echo "=== Rebuilding Cython extensions ==="
-    # Touch all .pyx files to force incremental rebuild (git checkout
-    # preserves timestamps so build_ext would skip unchanged files otherwise)
     find /testbed -name "*.pyx" -exec touch {} \\;
     $PYTHON setup.py build_ext --inplace 2>&1 | tail -20 || true
 elif [ -f /testbed/pyproject.toml ]; then
-    $PIP install -e . --no-build-isolation 2>&1 | tail -10 || true
+    $PIP install -e . --no-build-isolation -q 2>&1 | tail -5 || true
 fi
 
-# 0. Install requirements from the repo at the checked-out commit.
-for REQ in requirements-dev.txt requirements_dev.txt requirements-test.txt requirements_test.txt requirements.txt; do
-    if [ -f "/testbed/$REQ" ]; then
-        $PIP install -q -r "/testbed/$REQ" 2>&1 | tail -5 || true
-        break
-    fi
-done
-
-# 0b. Reinstall the repo itself in editable mode (picks up new entry points).
+# Reinstall the repo itself in editable mode (picks up new entry points).
+# Common deps are pre-installed in the Docker image - this is fast.
 $PIP install -e . -q 2>&1 | tail -5 || true
-
-# 0c. Install common test dependencies that are often missing.
-# Covers all repos seen in R2E-Gym-Lite failure analysis:
-#   PIL/Pillow (pillow repo, 433 tasks)
-#   mock (orange3, 69 tasks)
-#   appdirs (orange3, 90 tasks)
-#   setuptools (88 tasks - needed by pkg_resources)
-#   unittest-mixins (11 tasks)
-#   importlib-metadata (multiple repos, 40 tasks)
-#   itemadapter (scrapy, 21 tasks)
-#   pyramid (pyramid repo, 11 tasks)
-#   defusedxml, gitpython, openpyxl (misc)
-$PIP install -q \\
-    Pillow mock appdirs defusedxml gitpython openpyxl \\
-    setuptools unittest-mixins \\
-    importlib-metadata itemadapter pyramid \\
-    2>&1 | tail -5 || true
 
 # 1. Run tests.
 #    PYTHONPATH includes:
