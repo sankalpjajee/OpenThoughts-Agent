@@ -181,12 +181,15 @@ $PIP install -e . -q 2>&1 | tail -5 || true
 #   PIL/Pillow (pillow repo, 433 tasks)
 #   mock (orange3, 69 tasks)
 #   appdirs (orange3, 90 tasks)
+#   setuptools (88 tasks - needed by pkg_resources)
+#   unittest-mixins (11 tasks)
 #   importlib-metadata (multiple repos, 40 tasks)
 #   itemadapter (scrapy, 21 tasks)
 #   pyramid (pyramid repo, 11 tasks)
 #   defusedxml, gitpython, openpyxl (misc)
 $PIP install -q \\
     Pillow mock appdirs defusedxml gitpython openpyxl \\
+    setuptools unittest-mixins \\
     importlib-metadata itemadapter pyramid \\
     2>&1 | tail -5 || true
 
@@ -195,14 +198,28 @@ $PIP install -q \\
 #      /tests        - so 'helper' and other test-local modules are importable
 #      /testbed/tests - so 'tests' package imports work (pandas, etc.)
 #      /testbed      - so the repo source is on the path
-PYTHONPATH=/tests:/testbed/tests:/testbed:$PYTHONPATH $PYTHON -m pytest /tests/test_*.py \\
-    --ignore=/tests/test_state.py \\
-    --ignore-glob=/tests/test_OW*.py \\
-    -v --tb=short \\
-    -p no:qt \\
-    --import-mode=importlib \\
-    --rootdir=/testbed \\
-    2>&1 | tee /logs/pytest_output.txt || true
+#
+# NOTE: Do NOT use --import-mode=importlib (breaks setuptools/pkg_resources)
+# NOTE: Do NOT use --rootdir=/testbed (overrides conftest.py discovery)
+# For pyramid relative imports, we copy test files into the package tree
+# and run pytest from /testbed so the package structure is preserved.
+if ls /testbed/tests/test_*.py 2>/dev/null | head -1 | grep -q .; then
+    # Repo has its own tests/ dir - copy injected tests there and run from /testbed
+    cp /tests/test_*.py /testbed/tests/ 2>/dev/null || true
+    PYTHONPATH=/tests:/testbed/tests:/testbed:$PYTHONPATH $PYTHON -m pytest /testbed/tests/test_*.py \\
+        --ignore=/testbed/tests/test_state.py \\
+        --ignore-glob=/testbed/tests/test_OW*.py \\
+        -v --tb=short \\
+        -p no:qt \\
+        2>&1 | tee /logs/pytest_output.txt || true
+else
+    PYTHONPATH=/tests:/testbed/tests:/testbed:$PYTHONPATH $PYTHON -m pytest /tests/test_*.py \\
+        --ignore=/tests/test_state.py \\
+        --ignore-glob=/tests/test_OW*.py \\
+        -v --tb=short \\
+        -p no:qt \\
+        2>&1 | tee /logs/pytest_output.txt || true
+fi
 
 # 2. Calculate reward
 $PYTHON - <<'PYEOF'
