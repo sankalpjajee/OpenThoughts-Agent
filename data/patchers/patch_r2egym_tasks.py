@@ -198,6 +198,8 @@ PYTHONPATH=/tests:/testbed/tests:/testbed:$PYTHONPATH $PYTHON -m pytest /tests/t
     --ignore-glob=/tests/test_OW*.py \\
     -v --tb=short \\
     -p no:qt \\
+    --import-mode=importlib \\
+    --rootdir=/testbed \\
     2>&1 | tee /logs/pytest_output.txt || true
 
 # 2. Calculate reward
