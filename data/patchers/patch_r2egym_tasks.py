@@ -128,44 +128,50 @@ set -x
 
 mkdir -p /logs/verifier
 
-# Resolve pip: prefer the venv that R2E-Gym created, fall back to system pip.
-if [ -f /testbed/.venv/bin/pip ]; then
+# ---------------------------------------------------------------------------
+# Resolve the Python / pip to use.
+#
+# R2E-Gym builds each repo inside a uv-managed venv at /testbed/.venv.
+# The venv's Python has all the repo deps installed.  We MUST use this
+# Python (not the system one) so that pytest can import the repo packages.
+#
+# If no venv exists fall back to the system Python.
+# ---------------------------------------------------------------------------
+if [ -f /testbed/.venv/bin/python ]; then
+    PYTHON=/testbed/.venv/bin/python
     PIP=/testbed/.venv/bin/pip
-elif [ -f /testbed/.venv/bin/pip3 ]; then
+elif [ -f /testbed/.venv/bin/python3 ]; then
+    PYTHON=/testbed/.venv/bin/python3
     PIP=/testbed/.venv/bin/pip3
 else
-    PIP=pip
+    PYTHON=python3
+    PIP=pip3
 fi
 
 cd /testbed
 
-# 0. Install all requirements from the repo at the checked-out commit.
+# 0. Install requirements from the repo at the checked-out commit.
 #    R2E-Gym used: uv pip install -U -r requirements-dev.txt
-#    We replicate that with regular pip (uv may not be available).
-#    Try the most common requirements file names in priority order.
+#    Try common requirements file names in priority order.
 for REQ in requirements-dev.txt requirements_dev.txt requirements-test.txt requirements_test.txt requirements.txt; do
     if [ -f "/testbed/$REQ" ]; then
-        $PIP install -q -r "/testbed/$REQ" 2>/dev/null || true
+        $PIP install -q -r "/testbed/$REQ" 2>&1 | tail -5 || true
         break
     fi
 done
 
-# 0b. Reinstall the repo itself in editable mode (picks up any new entry points
-#     or C extensions declared in setup.py / pyproject.toml).
-$PIP install -e . -q 2>/dev/null || true
+# 0b. Reinstall the repo itself in editable mode.
+$PIP install -e . -q 2>&1 | tail -5 || true
 
 # 0c. Rebuild Cython extensions in-place for the checked-out commit.
-#     Skips if setup.py doesn't exist or build fails (non-Cython repos).
 if [ -f /testbed/setup.py ]; then
-    python setup.py build_ext --inplace -q 2>/dev/null || true
+    $PYTHON setup.py build_ext --inplace -q 2>/dev/null || true
 fi
 
-# 1. Run tests — use -v so each result line is "PASSED" or "FAILED",
-#    exclude test_state.py (it is a reward reader, not a test).
-#    Exclude GUI widget tests (OW* prefix) that require a Qt display and crash
-#    pytest with SIGABRT in headless containers.
-#    Write output to a log file for parsing.
-pytest /tests/test_*.py \\
+# 1. Run tests using the VENV Python's pytest so all imports resolve.
+#    -v: one result line per test (PASSED/FAILED/ERROR/SKIPPED)
+#    Exclude test_state.py (reward reader) and GUI widget tests (OW*).
+$PYTHON -m pytest /tests/test_*.py \\
     --ignore=/tests/test_state.py \\
     --ignore-glob=/tests/test_OW*.py \\
     -v --tb=short \\
@@ -173,7 +179,7 @@ pytest /tests/test_*.py \\
     2>&1 | tee /logs/pytest_output.txt || true
 
 # 2. Calculate reward
-python3 - <<'PYEOF'
+$PYTHON - <<'PYEOF'
 import json, re, sys
 from pathlib import Path
 
