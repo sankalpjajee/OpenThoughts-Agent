@@ -66,7 +66,7 @@ _COMMON_TEST_DEPS = [
     # Image/media
     'Pillow',
     # Test utilities
-    'mock', 'unittest-mixins',
+    'mock', 'unittest-mixins', 'pytest-xdist',
     # System/path utilities
     'appdirs', 'setuptools', 'importlib-metadata',
     # Data formats
@@ -77,6 +77,8 @@ _COMMON_TEST_DEPS = [
     'pyramid', 'plaster', 'plaster-pastedeploy',
     # Scrapy ecosystem
     'itemadapter',
+    # Python 2 compat shims
+    'sgmllib3k',
     # Misc
     'boto3', 'trubar',
 ]
@@ -108,11 +110,10 @@ def _build_dockerfile(repo_name: str) -> str:
         pkgs = ' '.join(extra_deps)
         extra_lines = f"\nRUN pip install {pkgs} -q 2>/dev/null || true"
 
-    # Determine which pip to use: venv if present, else system
-    pip_cmd = """RUN if [ -f /testbed/.venv/bin/python ]; then \\
-        /testbed/.venv/bin/python -m pip install {pkgs} -q 2>/dev/null || true; \\
-    else \\
-        pip3 install {pkgs} -q 2>/dev/null || true; \\
+    # Pre-install into both venv (if present) AND system pip to cover all cases
+    pip_cmd = """RUN pip3 install {pkgs} -q 2>/dev/null || true
+RUN if [ -f /testbed/.venv/bin/python ]; then \\\
+        /testbed/.venv/bin/python -m pip install {pkgs} -q 2>/dev/null || true; \\\
     fi""".format(pkgs=common_pkgs)
 
     return f"""\
@@ -180,18 +181,18 @@ PIP="$PYTHON -m pip"
 cd /testbed
 
 # ---------------------------------------------------------------------------
-# CRITICAL for numpy/scipy/aiohttp: after git checkout, the Cython-compiled
-# .so files are stale (compiled for the previous commit). We MUST rebuild
-# them before running any tests.
+# CRITICAL for numpy/scipy/aiohttp/pandas/pillow: after git checkout, the
+# Cython-compiled .so files are stale. We MUST rebuild them before tests.
+# Only do this for repos that actually have Cython extensions to avoid
+# wasting time on pure-Python repos (orange3, pyramid, scrapy, etc.).
 # Touch all .pyx files first to force incremental rebuild - git checkout
 # preserves timestamps so build_ext would skip unchanged files otherwise.
 # ---------------------------------------------------------------------------
-if [ -f /testbed/setup.py ]; then
+HAS_CYTHON=$(find /testbed -maxdepth 3 -name "*.pyx" 2>/dev/null | head -1)
+if [ -n "$HAS_CYTHON" ]; then
     echo "=== Rebuilding Cython extensions ==="
     find /testbed -name "*.pyx" -exec touch {} \\;
     $PYTHON setup.py build_ext --inplace 2>&1 | tail -20 || true
-elif [ -f /testbed/pyproject.toml ]; then
-    $PIP install -e . --no-build-isolation -q 2>&1 | tail -5 || true
 fi
 
 # Reinstall the repo itself in editable mode (picks up new entry points).
