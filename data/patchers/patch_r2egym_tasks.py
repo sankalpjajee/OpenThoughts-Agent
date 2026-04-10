@@ -130,8 +130,10 @@ mkdir -p /logs/verifier
 
 # ---------------------------------------------------------------------------
 # Resolve the Python / pip to use.
-# R2E-Gym builds each repo inside a uv-managed venv at /testbed/.venv.
-# The venv's Python has all the repo deps installed.
+#
+# Most repos: R2E-Gym builds inside a uv-managed venv at /testbed/.venv.
+# numpy / scipy: no venv — uses the system Python directly.
+# We detect which case we're in and set PYTHON/PIP accordingly.
 # ---------------------------------------------------------------------------
 if [ -f /testbed/.venv/bin/python ]; then
     PYTHON=/testbed/.venv/bin/python
@@ -140,14 +142,28 @@ elif [ -f /testbed/.venv/bin/python3 ]; then
     PYTHON=/testbed/.venv/bin/python3
     PIP=/testbed/.venv/bin/pip3
 else
-    PYTHON=python3
-    PIP=pip3
+    # No venv — use system Python (numpy, scipy, etc.)
+    PYTHON=$(which python3 || which python)
+    PIP=$(which pip3 || which pip)
 fi
 
 cd /testbed
 
+# ---------------------------------------------------------------------------
+# CRITICAL for numpy/scipy: after git checkout, the Cython-compiled .so files
+# are stale (compiled for the previous commit). We MUST rebuild them before
+# running any tests. This is the primary cause of:
+#   ImportError: Something is wrong with the numpy installation.
+#   ImportError: cannot import name 'scalarmath' from 'numpy.core'
+# ---------------------------------------------------------------------------
+if [ -f /testbed/setup.py ]; then
+    echo "=== Rebuilding Cython extensions ==="
+    $PYTHON setup.py build_ext --inplace 2>&1 | tail -10 || true
+elif [ -f /testbed/pyproject.toml ]; then
+    $PIP install -e . --no-build-isolation 2>&1 | tail -10 || true
+fi
+
 # 0. Install requirements from the repo at the checked-out commit.
-#    Try common requirements file names in priority order.
 for REQ in requirements-dev.txt requirements_dev.txt requirements-test.txt requirements_test.txt requirements.txt; do
     if [ -f "/testbed/$REQ" ]; then
         $PIP install -q -r "/testbed/$REQ" 2>&1 | tail -5 || true
@@ -155,22 +171,14 @@ for REQ in requirements-dev.txt requirements_dev.txt requirements-test.txt requi
     fi
 done
 
-# 0b. Reinstall the repo itself in editable mode.
+# 0b. Reinstall the repo itself in editable mode (picks up new entry points).
 $PIP install -e . -q 2>&1 | tail -5 || true
 
 # 0c. Install common test dependencies that are often missing.
-#     These are lightweight and safe to install unconditionally.
 $PIP install -q mock appdirs defusedxml gitpython openpyxl 2>&1 | tail -3 || true
 
-# 0d. Rebuild Cython extensions in-place for the checked-out commit.
-if [ -f /testbed/setup.py ]; then
-    $PYTHON setup.py build_ext --inplace -q 2>/dev/null || true
-fi
-
-# 1. Run tests using the VENV Python's pytest so all imports resolve.
+# 1. Run tests.
 #    Add /tests to PYTHONPATH so helper modules in /tests are importable.
-#    -v: one result line per test (PASSED/FAILED/ERROR/SKIPPED)
-#    Exclude test_state.py (reward reader) and GUI widget tests (OW*).
 PYTHONPATH=/tests:$PYTHONPATH $PYTHON -m pytest /tests/test_*.py \\
     --ignore=/tests/test_state.py \\
     --ignore-glob=/tests/test_OW*.py \\
