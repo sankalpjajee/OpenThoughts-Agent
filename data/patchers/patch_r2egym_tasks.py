@@ -132,7 +132,7 @@ mkdir -p /logs/verifier
 # Resolve the Python / pip to use.
 #
 # Most repos: R2E-Gym builds inside a uv-managed venv at /testbed/.venv.
-# numpy / scipy: no venv — uses the system Python directly.
+# numpy / scipy: no venv - uses the system Python directly.
 # We detect which case we're in and set PYTHON/PIP accordingly.
 # ---------------------------------------------------------------------------
 if [ -f /testbed/.venv/bin/python ]; then
@@ -142,7 +142,7 @@ elif [ -f /testbed/.venv/bin/python3 ]; then
     PYTHON=/testbed/.venv/bin/python3
     PIP=/testbed/.venv/bin/pip3
 else
-    # No venv — use system Python (numpy, scipy, etc.)
+    # No venv - use system Python (numpy, scipy, etc.)
     PYTHON=$(which python3 || which python)
     PIP=$(which pip3 || which pip)
 fi
@@ -263,7 +263,7 @@ PYEOF
 """
 
 # ---------------------------------------------------------------------------
-# tests/test_state.py — Harbor reward reader
+# tests/test_state.py - Harbor reward reader
 # ---------------------------------------------------------------------------
 
 _TEST_STATE_PY = """\
