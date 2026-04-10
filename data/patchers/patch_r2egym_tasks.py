@@ -130,12 +130,8 @@ mkdir -p /logs/verifier
 
 # ---------------------------------------------------------------------------
 # Resolve the Python / pip to use.
-#
 # R2E-Gym builds each repo inside a uv-managed venv at /testbed/.venv.
-# The venv's Python has all the repo deps installed.  We MUST use this
-# Python (not the system one) so that pytest can import the repo packages.
-#
-# If no venv exists fall back to the system Python.
+# The venv's Python has all the repo deps installed.
 # ---------------------------------------------------------------------------
 if [ -f /testbed/.venv/bin/python ]; then
     PYTHON=/testbed/.venv/bin/python
@@ -151,7 +147,6 @@ fi
 cd /testbed
 
 # 0. Install requirements from the repo at the checked-out commit.
-#    R2E-Gym used: uv pip install -U -r requirements-dev.txt
 #    Try common requirements file names in priority order.
 for REQ in requirements-dev.txt requirements_dev.txt requirements-test.txt requirements_test.txt requirements.txt; do
     if [ -f "/testbed/$REQ" ]; then
@@ -163,15 +158,20 @@ done
 # 0b. Reinstall the repo itself in editable mode.
 $PIP install -e . -q 2>&1 | tail -5 || true
 
-# 0c. Rebuild Cython extensions in-place for the checked-out commit.
+# 0c. Install common test dependencies that are often missing.
+#     These are lightweight and safe to install unconditionally.
+$PIP install -q mock appdirs defusedxml gitpython openpyxl 2>&1 | tail -3 || true
+
+# 0d. Rebuild Cython extensions in-place for the checked-out commit.
 if [ -f /testbed/setup.py ]; then
     $PYTHON setup.py build_ext --inplace -q 2>/dev/null || true
 fi
 
 # 1. Run tests using the VENV Python's pytest so all imports resolve.
+#    Add /tests to PYTHONPATH so helper modules in /tests are importable.
 #    -v: one result line per test (PASSED/FAILED/ERROR/SKIPPED)
 #    Exclude test_state.py (reward reader) and GUI widget tests (OW*).
-$PYTHON -m pytest /tests/test_*.py \\
+PYTHONPATH=/tests:$PYTHONPATH $PYTHON -m pytest /tests/test_*.py \\
     --ignore=/tests/test_state.py \\
     --ignore-glob=/tests/test_OW*.py \\
     -v --tb=short \\
@@ -192,7 +192,6 @@ def calculate():
             return 0.0
         meta = json.loads(meta_path.read_text())
 
-        # FIX 4: expected_output_json is stored as a JSON string, not a dict
         expected_raw = meta.get('expected_output_json', {})
         if isinstance(expected_raw, str):
             expected = json.loads(expected_raw)
@@ -203,34 +202,34 @@ def calculate():
             print('WARNING: expected_output_json is empty')
             return 0.0
 
-        # FIX 6: Parse pytest -v stdout instead of pytest-json-report.
-        # Verbose pytest lines look like:
-        #   tests/test_foo.py::ClassName::test_method PASSED
-        #   tests/test_foo.py::test_function FAILED
         output_path = Path('/logs/pytest_output.txt')
         if not output_path.exists():
             print('ERROR: /logs/pytest_output.txt not found')
             return 0.0
 
         actual_results = {}
-        # Match lines ending with PASSED, FAILED, ERROR, SKIPPED
         line_re = re.compile(r'^(\S+)\s+(PASSED|FAILED|ERROR|SKIPPED)', re.MULTILINE)
         for m in line_re.finditer(output_path.read_text()):
-            nodeid = m.group(1)   # e.g. tests/test_foo.py::Cls::test_bar
-            outcome = m.group(2)  # PASSED / FAILED / ERROR / SKIPPED
+            nodeid = m.group(1)
+            outcome = m.group(2)
             parts = nodeid.split('::')
-            # FIX 5: join class + method with '.' to match expected_output_json keys
-            key = '.'.join(parts[1:])  # 'Cls.test_bar' or 'test_bar'
+            key = '.'.join(parts[1:])
             actual_results[key] = outcome
 
         print('Actual results:', actual_results)
         print('Expected:', expected)
 
-        # Compare: all expected tests must match
+        # Compare: all expected tests must match.
+        # Treat ERROR and FAILED as equivalent (both mean non-passing).
+        def normalize(s):
+            if s in ('ERROR', 'FAILED'):
+                return 'FAILED'
+            return s
+
         mismatches = []
         for test_name, expected_status in expected.items():
             actual_status = actual_results.get(test_name)
-            if actual_status != expected_status:
+            if normalize(actual_status) != normalize(expected_status):
                 mismatches.append(
                     '  {}: expected={} actual={}'.format(test_name, expected_status, actual_status)
                 )
@@ -539,7 +538,14 @@ def main() -> None:
                     for part in fname.replace("\\", "/").split("/"))
                 for fname in test_file_names
             )
-            if gui_by_class or gui_by_file:
+            # GUI if ANY test file imports orangewidget or Orange.widgets
+            # (these crash pytest with SIGABRT even in non-OW* named files)
+            _GUI_IMPORTS = ("orangewidget", "Orange.widgets", "AnyQt", "PyQt5", "PyQt4")
+            gui_by_import = any(
+                any(imp in code for imp in _GUI_IMPORTS)
+                for code in test_file_codes
+            )
+            if gui_by_class or gui_by_file or gui_by_import:
                 print(f"[{i}] Skip: GUI/widget task for {commit[:8]}")
                 skipped += 1
                 continue
