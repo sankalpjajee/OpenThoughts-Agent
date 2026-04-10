@@ -137,15 +137,14 @@ mkdir -p /logs/verifier
 # ---------------------------------------------------------------------------
 if [ -f /testbed/.venv/bin/python ]; then
     PYTHON=/testbed/.venv/bin/python
-    PIP=/testbed/.venv/bin/pip
 elif [ -f /testbed/.venv/bin/python3 ]; then
     PYTHON=/testbed/.venv/bin/python3
-    PIP=/testbed/.venv/bin/pip3
 else
     # No venv - use system Python (numpy, scipy, etc.)
     PYTHON=$(which python3 || which python)
-    PIP=$(which pip3 || which pip)
 fi
+# Always use 'python -m pip' to avoid missing pip binary issues
+PIP="$PYTHON -m pip"
 
 cd /testbed
 
@@ -158,7 +157,10 @@ cd /testbed
 # ---------------------------------------------------------------------------
 if [ -f /testbed/setup.py ]; then
     echo "=== Rebuilding Cython extensions ==="
-    $PYTHON setup.py build_ext --inplace 2>&1 | tail -10 || true
+    # Touch all .pyx files to force incremental rebuild (git checkout
+    # preserves timestamps so build_ext would skip unchanged files otherwise)
+    find /testbed -name "*.pyx" -exec touch {} \\;
+    $PYTHON setup.py build_ext --inplace 2>&1 | tail -20 || true
 elif [ -f /testbed/pyproject.toml ]; then
     $PIP install -e . --no-build-isolation 2>&1 | tail -10 || true
 fi
