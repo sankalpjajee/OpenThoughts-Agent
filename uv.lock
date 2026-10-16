@@ -2622,7 +2622,7 @@ wheels = [
 [[package]]
 name = "harbor"
 version = "0.8.1"
-source = { git = "https://github.com/marin-community/harbor.git?rev=main#1d29d200414b6488a87192f50f617b1b5bd4b6f4" }
+source = { git = "https://github.com/marin-community/harbor.git?rev=main#79ea96fb37928223137bf52a82d7feee247a2af9" }
 dependencies = [
     { name = "dirhash" },
     { name = "fastapi" },
